@@ -214,7 +214,8 @@ static NSString *ListAllModules() {
 static void (*orig_StartCoolDown)(void *thiz, int32_t nCur, int32_t nMax, void *method);
 static void (*orig_EndCoolDown)(void *thiz, void *method);
 
-// ============ Hook 实现（当前未使用） ============
+// ============ Hook 实现（当前未使用，加 __unused 避免编译报错） ============
+__attribute__((unused))
 static void new_StartCoolDown(void *thiz, int32_t nCur, int32_t nMax, void *method) {
     g_hookHitCount_Start++;
     g_lastCurCD = nCur;
@@ -224,7 +225,9 @@ static void new_StartCoolDown(void *thiz, int32_t nCur, int32_t nMax, void *meth
         nCur = 0;
     }
 
-    orig_StartCoolDown(thiz, nCur, nMax, method);
+    if (orig_StartCoolDown) {
+        orig_StartCoolDown(thiz, nCur, nMax, method);
+    }
 
     if (g_bResetCDToZero && thiz) {
         *(float *)((uintptr_t)thiz + OFFSET_fCurCoolDownTimeLeft) = 0.0f;
@@ -233,9 +236,13 @@ static void new_StartCoolDown(void *thiz, int32_t nCur, int32_t nMax, void *meth
     }
 }
 
+__attribute__((unused))
 static void new_EndCoolDown(void *thiz, void *method) {
     g_hookHitCount_End++;
-    orig_EndCoolDown(thiz, method);
+
+    if (orig_EndCoolDown) {
+        orig_EndCoolDown(thiz, method);
+    }
 
     if (g_bResetCDToZero && thiz) {
         *(float *)((uintptr_t)thiz + OFFSET_fCurCoolDownTimeLeft) = 0.0f;
