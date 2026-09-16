@@ -5,11 +5,10 @@
 // ============ 基础配置 ============
 #define MODULE_NAME "UnityFramework"
 
-// KeySkillUnit 正确地址
-#define RVA_StartCoolDown  0x269D08C   // StartCoolDown(Int32, Int32)
-#define RVA_EndCoolDown    0x269EA7C   // EndCoolDown()
+// 暂时保留，但当前不会使用
+#define RVA_StartCoolDown  0x269D08C
+#define RVA_EndCoolDown    0x269EA7C
 
-// 字段偏移
 #define OFFSET_fCurCoolDownTimeLeft  0x10
 #define OFFSET_fMaxCoolDownTime      0x14
 #define OFFSET_bStartCD              0x80
@@ -32,7 +31,7 @@ static NSMutableString *g_lastModuleListText = nil;
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *view = [super hitTest:point withEvent:event];
     if (view == self || view == self.rootViewController.view) {
-        return nil; // 穿透
+        return nil;
     }
     return view;
 }
@@ -154,7 +153,7 @@ static void ShowAlert(NSString *title, NSString *message) {
 - (void)onTap {
     NSString *msg = [NSString stringWithFormat:
         @"Hook已安装: %@\n\nStartCoolDown 命中: %ld\nEndCoolDown 命中: %ld\n\n最近curCD: %d\n最近maxCD: %d\n\n清零CD开关: %@",
-        g_bHooksInstalled ? @"是" : @"否",
+        g_bHooksInstalled ? @"是（当前无实际Hook）" : @"否",
         (long)g_hookHitCount_Start, (long)g_hookHitCount_End,
         g_lastCurCD, g_lastMaxCD,
         g_bResetCDToZero ? @"开启" : @"关闭"];
@@ -211,11 +210,11 @@ static NSString *ListAllModules() {
     return result;
 }
 
-// ============ 原函数指针（注意 MethodInfo*） ============
+// ============ 原函数指针（当前未使用） ============
 static void (*orig_StartCoolDown)(void *thiz, int32_t nCur, int32_t nMax, void *method);
 static void (*orig_EndCoolDown)(void *thiz, void *method);
 
-// ============ Hook 实现 ============
+// ============ Hook 实现（当前未使用） ============
 static void new_StartCoolDown(void *thiz, int32_t nCur, int32_t nMax, void *method) {
     g_hookHitCount_Start++;
     g_lastCurCD = nCur;
@@ -227,7 +226,6 @@ static void new_StartCoolDown(void *thiz, int32_t nCur, int32_t nMax, void *meth
 
     orig_StartCoolDown(thiz, nCur, nMax, method);
 
-    // 强制写字段（最可靠）
     if (g_bResetCDToZero && thiz) {
         *(float *)((uintptr_t)thiz + OFFSET_fCurCoolDownTimeLeft) = 0.0f;
         *(bool *)((uintptr_t)thiz + OFFSET_bStartCD) = false;
@@ -246,24 +244,27 @@ static void new_EndCoolDown(void *thiz, void *method) {
     }
 }
 
-// ============ 安装 Hook ============
+// ============ 安装 Hook（当前已全部关闭） ============
 static void TryInstallHooks(void) {
     if (g_bHooksInstalled) return;
 
     uintptr_t base = getModuleBaseAccurate(MODULE_NAME);
     if (base == 0) return;
 
+    // ========== 当前已关闭所有 Hook，只验证是否还会闪退 ==========
+    /*
     void *addr_start = (void *)(base + RVA_StartCoolDown);
     MSHookFunction(addr_start, (void *)new_StartCoolDown, (void **)&orig_StartCoolDown);
 
     void *addr_end = (void *)(base + RVA_EndCoolDown);
     MSHookFunction(addr_end, (void *)new_EndCoolDown, (void **)&orig_EndCoolDown);
+    */
 
     g_bHooksInstalled = YES;
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        ShowAlert(@"CDTweak 已加载", 
-                  [NSString stringWithFormat:@"UnityFramework 基址: 0x%lx\n\n点绿色按钮查看状态", (unsigned long)base]);
+        ShowAlert(@"CDTweak 已加载（当前无任何Hook）",
+                  [NSString stringWithFormat:@"基址: 0x%lx\n\n请先进副本测试是否还会闪退", (unsigned long)base]);
         if (!g_statusButton) {
             g_statusButton = [[CDStatusButton alloc] init];
         }
