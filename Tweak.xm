@@ -4,14 +4,12 @@
 
 #define MODULE_NAME "UnityFramework"
 #define RVA_UpdateCD  0x21EC7A4
-#define OFFSET_CD     0x60
 
-static BOOL g_bNoCD = YES;
 static BOOL g_bHooksInstalled = NO;
 static NSInteger g_hitCount = 0;
 static uintptr_t g_base = 0;
 
-// ============ 弹窗容器（触摸穿透） ============
+// ============ 弹窗 ============
 @interface CDAlertHostWindow : UIWindow
 @end
 @implementation CDAlertHostWindow
@@ -62,26 +60,19 @@ static void ShowStatus() {
         }
 
         NSString *msg = [NSString stringWithFormat:
+            @"模式: 仅计数（不写内存）\n"
             @"Hook状态: %@\n"
             @"命中次数: %ld\n"
-            @"无CD开关: %@\n"
             @"基址: 0x%lx\n"
             @"RVA: 0x%X",
             g_bHooksInstalled ? @"已安装" : @"未安装",
             (long)g_hitCount,
-            g_bNoCD ? @"开启" : @"关闭",
             (unsigned long)g_base,
             RVA_UpdateCD];
 
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"CDTweak 状态"
                                                                        message:msg
                                                                 preferredStyle:UIAlertControllerStyleAlert];
-
-        [alert addAction:[UIAlertAction actionWithTitle:g_bNoCD ? @"关闭无CD" : @"开启无CD"
-                                                   style:UIAlertActionStyleDefault
-                                                 handler:^(UIAlertAction *a) {
-            g_bNoCD = !g_bNoCD;
-        }]];
 
         [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) {
             vc.view.userInteractionEnabled = NO;
@@ -137,17 +128,12 @@ static void ShowStatus() {
 
 static CDButton *g_btn = nil;
 
-// ============ Hook ============
+// ============ Hook（只计数，不写任何内存） ============
 static void (*orig_UpdateCD)(void *thiz);
 
 static void new_UpdateCD(void *thiz) {
     g_hitCount++;
-
-    if (g_bNoCD && thiz) {
-        int32_t *p = (int32_t *)((uintptr_t)thiz + OFFSET_CD);
-        if (*p > 0) *p = 0;
-    }
-    orig_UpdateCD(thiz);
+    orig_UpdateCD(thiz);   // 原样调用，不做任何修改
 }
 
 static uintptr_t getModuleBase(const char *name) {
