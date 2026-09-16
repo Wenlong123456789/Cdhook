@@ -5,21 +5,21 @@
 // ============ 基础配置 ============
 #define MODULE_NAME "UnityFramework"
 
-#define RVA_StartCoolDown_v3  0x27EBD00   // StartCoolDown(Single, Single)
-#define RVA_EndCoolDown       0x269EA7C   // EndCoolDown()
-#define RVA_IsInCoolDown      0x272906C   // IsInCoolDown()
+// 正确的 RVA（KeySkillUnit）
+#define RVA_StartCoolDown  0x269D08C   // StartCoolDown(Int32 nCur, Int32 nMax)
+#define RVA_EndCoolDown    0x269EA7C   // EndCoolDown()
 
-#define OFFSET_fCurCoolDownTimeLeft  0x10
-#define OFFSET_fMaxCoolDownTime      0x14
+// KeySkillUnit 字段偏移
+#define OFFSET_bStartCD    0x80        // bool
+#define OFFSET_bCanUse     0x81        // bool
 
 // ============ 全局状态 ============
 static BOOL g_bResetCDToZero = NO;
 static BOOL g_bHooksInstalled = NO;
 static NSInteger g_hookHitCount_Start = 0;
 static NSInteger g_hookHitCount_End   = 0;
-static NSInteger g_hookHitCount_IsIn  = 0;
-static float     g_lastCurCD = -1;
-static float     g_lastMaxCD = -1;
+static int32_t   g_lastCurCD = -1;
+static int32_t   g_lastMaxCD = -1;
 static NSMutableString *g_lastModuleListText = nil;
 
 // ============ 自建一个专用于弹窗展示的容器（不依赖游戏自己的窗口结构） ============
@@ -27,6 +27,15 @@ static NSMutableString *g_lastModuleListText = nil;
 @end
 
 @implementation CDAlertHostWindow
+// 关键：只在真正有弹窗时才参与 hit-test，平时完全穿透
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *view = [super hitTest:point withEvent:event];
+    // 如果点中的是自己或者 rootViewController.view，则穿透
+    if (view == self || view == self.rootViewController.view) {
+        return nil;
+    }
+    return view;
+}
 @end
 
 static CDAlertHostWindow *g_alertHostWindow = nil;
@@ -52,11 +61,13 @@ static UIViewController *AlertHostController() {
 
     g_alertHostVC = [[UIViewController alloc] init];
     g_alertHostVC.view.backgroundColor = [UIColor clearColor];
+    // 关键：让 rootView 也不拦截触摸
+    g_alertHostVC.view.userInteractionEnabled = NO;
 
     g_alertHostWindow.rootViewController = g_alertHostVC;
     g_alertHostWindow.windowLevel = UIWindowLevelAlert + 1;
     g_alertHostWindow.backgroundColor = [UIColor clearColor];
-    g_alertHostWindow.hidden = NO; // 不调用makeKeyAndVisible，避免抢KeyWindow
+    g_alertHostWindow.hidden = NO; // 仍然保持显示，但 hitTest 已穿透
 
     return g_alertHostVC;
 }
@@ -67,6 +78,9 @@ static void ShowAlertWithCopy(NSString *title, NSString *message, NSString *copy
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *top = AlertHostController();
         if (!top) return;
+
+        // 临时打开交互
+        top.view.userInteractionEnabled = YES;
 
         if (top.presentedViewController) {
             [top dismissViewControllerAnimated:NO completion:nil];
@@ -86,7 +100,10 @@ static void ShowAlertWithCopy(NSString *title, NSString *message, NSString *copy
             [top presentViewController:confirm animated:YES completion:nil];
         }]];
 
-        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:^(UIAlertAction * _Nonnull action) {
+            // 弹窗关闭后重新关闭交互
+            top.view.userInteractionEnabled = NO;
+        }]];
         [top presentViewController:alert animated:YES completion:nil];
     });
 }
@@ -113,7 +130,7 @@ static void ShowAlert(NSString *title, NSString *message) {
             }
         }
 
-        self.windowLevel = UIWindowLevelAlert + 1;
+        self.windowLevel = UIWindowLevelAlert + 2; // 比 AlertHost 高一点
         self.backgroundColor = [UIColor clearColor];
         self.hidden = NO;
 
@@ -142,14 +159,17 @@ static void ShowAlert(NSString *title, NSString *message) {
 
 - (void)onTap {
     NSString *msg = [NSString stringWithFormat:
-        @"Hook已安装: %@\n\nStartCoolDown 命中: %ld\nEndCoolDown 命中: %ld\nIsInCoolDown 命中: %ld\n\n最近curCD: %.2f\n最近maxCD: %.2f\n\n清零CD开关: %@",
+        @"Hook已安装: %@\n\nStartCoolDown 命中: %ld\nEndCoolDown 命中: %ld\n\n最近curCD: %d\n最近maxCD: %d\n\n清零CD开关: %@",
         g_bHooksInstalled ? @"是" : @"否(模块未找到)",
-        (long)g_hookHitCount_Start, (long)g_hookHitCount_End, (long)g_hookHitCount_IsIn,
+        (long)g_hookHitCount_Start, (long)g_hookHitCount_End,
         g_lastCurCD, g_lastMaxCD,
         g_bResetCDToZero ? @"开启" : @"关闭"];
 
     UIViewController *top = AlertHostController();
     if (!top) return;
+
+    top.view.userInteractionEnabled = YES;
+
     if (top.presentedViewController) {
         [top dismissViewControllerAnimated:NO completion:nil];
     }
@@ -165,7 +185,9 @@ static void ShowAlert(NSString *title, NSString *message) {
     [alert addAction:[UIAlertAction actionWithTitle:@"复制模块列表" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         [UIPasteboard generalPasteboard].string = g_lastModuleListText ?: @"(暂无数据)";
     }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:^(UIAlertAction * _Nonnull action) {
+        top.view.userInteractionEnabled = NO;
+    }]];
     [top presentViewController:alert animated:YES completion:nil];
 }
 
@@ -198,43 +220,38 @@ static NSString *ListAllModules() {
 }
 
 // ============ 原函数指针 ============
-// 注意：IL2Cpp编译出的原生函数通常会在参数末尾隐式追加一个
-// const MethodInfo* method 参数，必须原样转发，否则调用约定错位，
-// 某些代码路径下会导致崩溃（很可能就是进副本闪退的根因）。
-static void (*orig_StartCoolDown_v3)(void *thiz, float fCur, float fMax, void *method);
+// IL2Cpp 原生函数通常会在参数末尾隐式追加 const MethodInfo* method
+static void (*orig_StartCoolDown)(void *thiz, int32_t nCur, int32_t nMax, void *method);
 static void (*orig_EndCoolDown)(void *thiz, void *method);
-static bool (*orig_IsInCoolDown)(void *thiz, void *method);
 
 // ============ Hook实现 ============
-static void new_StartCoolDown_v3(void *thiz, float fCur, float fMax, void *method) {
+static void new_StartCoolDown(void *thiz, int32_t nCur, int32_t nMax, void *method) {
     g_hookHitCount_Start++;
-    g_lastCurCD = fCur;
-    g_lastMaxCD = fMax;
+    g_lastCurCD = nCur;
+    g_lastMaxCD = nMax;
 
     if (g_bResetCDToZero) {
-        fCur = 0.0f;
+        nCur = 0;
     }
 
-    orig_StartCoolDown_v3(thiz, fCur, fMax, method);
+    orig_StartCoolDown(thiz, nCur, nMax, method);
 
+    // 直接写字段强制可用（更可靠）
     if (g_bResetCDToZero && thiz != NULL) {
-        *(float *)((uintptr_t)thiz + OFFSET_fCurCoolDownTimeLeft) = 0.0f;
+        *(bool *)((uintptr_t)thiz + OFFSET_bStartCD) = false; // 不在CD中
+        *(bool *)((uintptr_t)thiz + OFFSET_bCanUse)  = true;  // 可以使用
     }
 }
 
 static void new_EndCoolDown(void *thiz, void *method) {
     g_hookHitCount_End++;
     orig_EndCoolDown(thiz, method);
-}
 
-static bool new_IsInCoolDown(void *thiz, void *method) {
-    bool ret = orig_IsInCoolDown(thiz, method);
-    g_hookHitCount_IsIn++;
-
-    if (g_bResetCDToZero) {
-        return false;
+    // 结束时也强制一下
+    if (g_bResetCDToZero && thiz != NULL) {
+        *(bool *)((uintptr_t)thiz + OFFSET_bStartCD) = false;
+        *(bool *)((uintptr_t)thiz + OFFSET_bCanUse)  = true;
     }
-    return ret;
 }
 
 // ============ 真正安装Hook的函数 ============
@@ -244,14 +261,13 @@ static void TryInstallHooks(void) {
     uintptr_t base = getModuleBaseAccurate(MODULE_NAME);
     if (base == 0) return;
 
-    void *addr_v3 = (void *)(base + RVA_StartCoolDown_v3);
-    MSHookFunction(addr_v3, (void *)new_StartCoolDown_v3, (void **)&orig_StartCoolDown_v3);
+    void *addr_start = (void *)(base + RVA_StartCoolDown);
+    MSHookFunction(addr_start, (void *)new_StartCoolDown, (void **)&orig_StartCoolDown);
 
     void *addr_end = (void *)(base + RVA_EndCoolDown);
     MSHookFunction(addr_end, (void *)new_EndCoolDown, (void **)&orig_EndCoolDown);
 
-    void *addr_isin = (void *)(base + RVA_IsInCoolDown);
-    MSHookFunction(addr_isin, (void *)new_IsInCoolDown, (void **)&orig_IsInCoolDown);
+    // 不再 hook IsInCoolDown（KeySkillUnit 里没有这个方法）
 
     g_bHooksInstalled = YES;
 
