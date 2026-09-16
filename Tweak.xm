@@ -1,5 +1,7 @@
 #import <substrate.h>
+#import <Foundation/Foundation.h>
 #import <mach-o/dyld.h>
+#import <string.h>
 
 #define MODULE_NAME "UnityFramework"
 
@@ -22,9 +24,11 @@ static void TryInstall() {
     NSLog(@"[CDTweak] 最小模式已加载，基址: 0x%lx", base);
 }
 
+static void OnImageAdded(const struct mach_header *mh, intptr_t slide) {
+    TryInstall();
+}
+
 %ctor {
     TryInstall();
-    _dyld_register_func_for_add_image([](const struct mach_header *mh, intptr_t slide) {
-        TryInstall();
-    });
+    _dyld_register_func_for_add_image(OnImageAdded);
 }
