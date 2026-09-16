@@ -85,9 +85,20 @@ static void ShowAlert(NSString *title, NSString *message) {
 - (instancetype)init {
     self = [super initWithFrame:CGRectMake(20, 80, 60, 60)];
     if (self) {
+        // 关键修复：显式绑定到当前活跃的windowScene，但不调用makeKeyAndVisible，
+        // 避免抢走游戏主窗口的KeyWindow身份（这会导致渲染/输入异常甚至崩溃）
+        if (@available(iOS 13.0, *)) {
+            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if (scene.activationState == UISceneActivationStateForegroundActive) {
+                    self.windowScene = scene;
+                    break;
+                }
+            }
+        }
+
         self.windowLevel = UIWindowLevelAlert + 1;
         self.backgroundColor = [UIColor clearColor];
-        self.hidden = NO;
+        self.hidden = NO; // 只是显示出来，不抢KeyWindow
 
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
         btn.frame = CGRectMake(0, 0, 60, 60);
@@ -226,7 +237,7 @@ static void TryInstallHooks(void) {
         ShowAlert(@"CDTweak 已加载", [NSString stringWithFormat:@"UnityFramework 基址: 0x%lx\n\n点左上角绿色按钮查看Hook状态", (unsigned long)base]);
         if (!g_statusButton) {
             g_statusButton = [[CDStatusButton alloc] init];
-            [g_statusButton makeKeyAndVisible];
+            // 注意：不调用 makeKeyAndVisible，避免抢占游戏主窗口的KeyWindow身份
         }
     });
 }
