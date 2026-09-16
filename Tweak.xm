@@ -1,140 +1,9 @@
 #import <substrate.h>
-#import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
 
 #define MODULE_NAME "UnityFramework"
-#define RVA_UpdateCD  0x21EC7A4
 
-static BOOL g_bHooksInstalled = NO;
-static NSInteger g_hitCount = 0;
-static uintptr_t g_base = 0;
-
-// ============ 弹窗 ============
-@interface CDAlertHostWindow : UIWindow
-@end
-@implementation CDAlertHostWindow
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *v = [super hitTest:point withEvent:event];
-    if (v == self || v == self.rootViewController.view) return nil;
-    return v;
-}
-@end
-
-static CDAlertHostWindow *g_alertWindow = nil;
-static UIViewController *g_alertVC = nil;
-
-static UIViewController *GetAlertVC() {
-    if (g_alertWindow) return g_alertVC;
-
-    if (@available(iOS 13.0, *)) {
-        for (UIWindowScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                g_alertWindow = [[CDAlertHostWindow alloc] initWithWindowScene:scene];
-                break;
-            }
-        }
-    }
-    if (!g_alertWindow) {
-        g_alertWindow = [[CDAlertHostWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    }
-
-    g_alertVC = [UIViewController new];
-    g_alertVC.view.backgroundColor = UIColor.clearColor;
-    g_alertVC.view.userInteractionEnabled = NO;
-
-    g_alertWindow.rootViewController = g_alertVC;
-    g_alertWindow.windowLevel = UIWindowLevelAlert + 1;
-    g_alertWindow.backgroundColor = UIColor.clearColor;
-    g_alertWindow.hidden = NO;
-    return g_alertVC;
-}
-
-static void ShowStatus() {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *vc = GetAlertVC();
-        if (!vc) return;
-        vc.view.userInteractionEnabled = YES;
-
-        if (vc.presentedViewController) {
-            [vc dismissViewControllerAnimated:NO completion:nil];
-        }
-
-        NSString *msg = [NSString stringWithFormat:
-            @"模式: 仅计数（不写内存）\n"
-            @"Hook状态: %@\n"
-            @"命中次数: %ld\n"
-            @"基址: 0x%lx\n"
-            @"RVA: 0x%X",
-            g_bHooksInstalled ? @"已安装" : @"未安装",
-            (long)g_hitCount,
-            (unsigned long)g_base,
-            RVA_UpdateCD];
-
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"CDTweak 状态"
-                                                                       message:msg
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-
-        [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) {
-            vc.view.userInteractionEnabled = NO;
-        }]];
-
-        [vc presentViewController:alert animated:YES completion:nil];
-    });
-}
-
-// ============ 悬浮按钮 ============
-@interface CDButton : UIWindow
-@end
-@implementation CDButton
-- (instancetype)init {
-    self = [super initWithFrame:CGRectMake(20, 100, 56, 56)];
-    if (self) {
-        if (@available(iOS 13.0, *)) {
-            for (UIWindowScene *s in UIApplication.sharedApplication.connectedScenes) {
-                if (s.activationState == UISceneActivationStateForegroundActive) {
-                    self.windowScene = s;
-                    break;
-                }
-            }
-        }
-        self.windowLevel = UIWindowLevelAlert + 2;
-        self.backgroundColor = UIColor.clearColor;
-        self.hidden = NO;
-
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-        btn.frame = CGRectMake(0, 0, 56, 56);
-        btn.backgroundColor = [UIColor colorWithRed:0.1 green:0.55 blue:0.9 alpha:0.9];
-        btn.layer.cornerRadius = 28;
-        [btn setTitle:@"CD" forState:UIControlStateNormal];
-        [btn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
-        [btn addTarget:self action:@selector(tap) forControlEvents:UIControlEventTouchUpInside];
-
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
-        [btn addGestureRecognizer:pan];
-        [self addSubview:btn];
-    }
-    return self;
-}
-- (void)drag:(UIPanGestureRecognizer *)p {
-    CGPoint t = [p translationInView:self];
-    self.center = CGPointMake(self.center.x + t.x, self.center.y + t.y);
-    [p setTranslation:CGPointZero inView:self];
-}
-- (void)tap {
-    ShowStatus();
-}
-@end
-
-static CDButton *g_btn = nil;
-
-// ============ Hook（只计数，不写任何内存） ============
-static void (*orig_UpdateCD)(void *thiz);
-
-static void new_UpdateCD(void *thiz) {
-    g_hitCount++;
-    orig_UpdateCD(thiz);   // 原样调用，不做任何修改
-}
+static BOOL g_installed = NO;
 
 static uintptr_t getModuleBase(const char *name) {
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
@@ -146,27 +15,16 @@ static uintptr_t getModuleBase(const char *name) {
 }
 
 static void TryInstall() {
-    if (g_bHooksInstalled) return;
-
-    g_base = getModuleBase(MODULE_NAME);
-    if (g_base == 0) return;
-
-    void *addr = (void *)(g_base + RVA_UpdateCD);
-    MSHookFunction(addr, (void *)new_UpdateCD, (void **)&orig_UpdateCD);
-
-    g_bHooksInstalled = YES;
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!g_btn) g_btn = [CDButton new];
-        ShowStatus();
-    });
-}
-
-static void OnImageAdded(const struct mach_header *mh, intptr_t slide) {
-    TryInstall();
+    if (g_installed) return;
+    uintptr_t base = getModuleBase(MODULE_NAME);
+    if (base == 0) return;
+    g_installed = YES;
+    NSLog(@"[CDTweak] 最小模式已加载，基址: 0x%lx", base);
 }
 
 %ctor {
     TryInstall();
-    _dyld_register_func_for_add_image(OnImageAdded);
+    _dyld_register_func_for_add_image([](const struct mach_header *mh, intptr_t slide) {
+        TryInstall();
+    });
 }
