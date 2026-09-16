@@ -22,36 +22,55 @@ static float     g_lastCurCD = -1;
 static float     g_lastMaxCD = -1;
 static NSMutableString *g_lastModuleListText = nil;
 
-// ============ 工具：找当前最顶层的ViewController ============
-static UIViewController *TopMostController() {
-    UIWindow *keyWindow = nil;
+// ============ 自建一个专用于弹窗展示的容器（不依赖游戏自己的窗口结构） ============
+@interface CDAlertHostWindow : UIWindow
+@end
+
+@implementation CDAlertHostWindow
+@end
+
+static CDAlertHostWindow *g_alertHostWindow = nil;
+static UIViewController *g_alertHostVC = nil;
+
+static UIViewController *AlertHostController() {
+    if (g_alertHostWindow) return g_alertHostVC;
+
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive) {
-                for (UIWindow *window in scene.windows) {
-                    if (window.isKeyWindow) { keyWindow = window; break; }
-                }
+                g_alertHostWindow = [[CDAlertHostWindow alloc] initWithWindowScene:scene];
+                break;
             }
         }
     }
-    if (!keyWindow) {
+    if (!g_alertHostWindow) {
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        keyWindow = [UIApplication sharedApplication].keyWindow;
+        g_alertHostWindow = [[CDAlertHostWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         #pragma clang diagnostic pop
     }
-    UIViewController *top = keyWindow.rootViewController;
-    while (top.presentedViewController) {
-        top = top.presentedViewController;
-    }
-    return top;
+
+    g_alertHostVC = [[UIViewController alloc] init];
+    g_alertHostVC.view.backgroundColor = [UIColor clearColor];
+
+    g_alertHostWindow.rootViewController = g_alertHostVC;
+    g_alertHostWindow.windowLevel = UIWindowLevelAlert + 1;
+    g_alertHostWindow.backgroundColor = [UIColor clearColor];
+    g_alertHostWindow.hidden = NO; // 不调用makeKeyAndVisible，避免抢KeyWindow
+
+    return g_alertHostVC;
 }
+
 
 // ============ 弹窗工具函数（带一键复制按钮） ============
 static void ShowAlertWithCopy(NSString *title, NSString *message, NSString *copyText) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *top = TopMostController();
+        UIViewController *top = AlertHostController();
         if (!top) return;
+
+        if (top.presentedViewController) {
+            [top dismissViewControllerAnimated:NO completion:nil];
+        }
 
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
                                                                          message:message
@@ -85,8 +104,6 @@ static void ShowAlert(NSString *title, NSString *message) {
 - (instancetype)init {
     self = [super initWithFrame:CGRectMake(20, 80, 60, 60)];
     if (self) {
-        // 关键修复：显式绑定到当前活跃的windowScene，但不调用makeKeyAndVisible，
-        // 避免抢走游戏主窗口的KeyWindow身份（这会导致渲染/输入异常甚至崩溃）
         if (@available(iOS 13.0, *)) {
             for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 if (scene.activationState == UISceneActivationStateForegroundActive) {
@@ -98,7 +115,7 @@ static void ShowAlert(NSString *title, NSString *message) {
 
         self.windowLevel = UIWindowLevelAlert + 1;
         self.backgroundColor = [UIColor clearColor];
-        self.hidden = NO; // 只是显示出来，不抢KeyWindow
+        self.hidden = NO;
 
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
         btn.frame = CGRectMake(0, 0, 60, 60);
@@ -131,8 +148,11 @@ static void ShowAlert(NSString *title, NSString *message) {
         g_lastCurCD, g_lastMaxCD,
         g_bResetCDToZero ? @"开启" : @"关闭"];
 
-    UIViewController *top = TopMostController();
+    UIViewController *top = AlertHostController();
     if (!top) return;
+    if (top.presentedViewController) {
+        [top dismissViewControllerAnimated:NO completion:nil];
+    }
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"CDTweak 状态"
                                                                      message:msg
@@ -165,7 +185,6 @@ static uintptr_t getModuleBaseAccurate(const char *moduleName) {
     return 0;
 }
 
-// 列出所有已加载模块名（完整版，不截断，供复制）
 static NSString *ListAllModules() {
     NSMutableString *result = [NSMutableString string];
     [result appendFormat:@"共 %u 个已加载模块:\n\n", _dyld_image_count()];
@@ -179,12 +198,15 @@ static NSString *ListAllModules() {
 }
 
 // ============ 原函数指针 ============
-static void (*orig_StartCoolDown_v3)(void *thiz, float fCur, float fMax);
-static void (*orig_EndCoolDown)(void *thiz);
-static bool (*orig_IsInCoolDown)(void *thiz);
+// 注意：IL2Cpp编译出的原生函数通常会在参数末尾隐式追加一个
+// const MethodInfo* method 参数，必须原样转发，否则调用约定错位，
+// 某些代码路径下会导致崩溃（很可能就是进副本闪退的根因）。
+static void (*orig_StartCoolDown_v3)(void *thiz, float fCur, float fMax, void *method);
+static void (*orig_EndCoolDown)(void *thiz, void *method);
+static bool (*orig_IsInCoolDown)(void *thiz, void *method);
 
 // ============ Hook实现 ============
-static void new_StartCoolDown_v3(void *thiz, float fCur, float fMax) {
+static void new_StartCoolDown_v3(void *thiz, float fCur, float fMax, void *method) {
     g_hookHitCount_Start++;
     g_lastCurCD = fCur;
     g_lastMaxCD = fMax;
@@ -193,20 +215,20 @@ static void new_StartCoolDown_v3(void *thiz, float fCur, float fMax) {
         fCur = 0.0f;
     }
 
-    orig_StartCoolDown_v3(thiz, fCur, fMax);
+    orig_StartCoolDown_v3(thiz, fCur, fMax, method);
 
     if (g_bResetCDToZero && thiz != NULL) {
         *(float *)((uintptr_t)thiz + OFFSET_fCurCoolDownTimeLeft) = 0.0f;
     }
 }
 
-static void new_EndCoolDown(void *thiz) {
+static void new_EndCoolDown(void *thiz, void *method) {
     g_hookHitCount_End++;
-    orig_EndCoolDown(thiz);
+    orig_EndCoolDown(thiz, method);
 }
 
-static bool new_IsInCoolDown(void *thiz) {
-    bool ret = orig_IsInCoolDown(thiz);
+static bool new_IsInCoolDown(void *thiz, void *method) {
+    bool ret = orig_IsInCoolDown(thiz, method);
     g_hookHitCount_IsIn++;
 
     if (g_bResetCDToZero) {
@@ -237,12 +259,11 @@ static void TryInstallHooks(void) {
         ShowAlert(@"CDTweak 已加载", [NSString stringWithFormat:@"UnityFramework 基址: 0x%lx\n\n点左上角绿色按钮查看Hook状态", (unsigned long)base]);
         if (!g_statusButton) {
             g_statusButton = [[CDStatusButton alloc] init];
-            // 注意：不调用 makeKeyAndVisible，避免抢占游戏主窗口的KeyWindow身份
         }
     });
 }
 
-// ============ dyld镜像加载回调：每次有新模块被加载都会触发 ============
+// ============ dyld镜像加载回调 ============
 static void OnImageAdded(const struct mach_header *mh, intptr_t vmaddr_slide) {
     TryInstallHooks();
 }
