@@ -7,20 +7,29 @@ on:
 
 jobs:
   build:
-runs-on: macos-latest
-
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Theos
-        uses: beerpiss/theos-action@v1
-        with:
-          theos-dir: theos
+      - name: Install dependencies
+        run: brew install ldid make
+
+      - name: Clone Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Download iOS SDK
+        run: |
+          curl -L -o iPhoneOS16.5.sdk.tar.xz \
+            https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz
+          mkdir -p "$THEOS/sdks"
+          tar -xJf iPhoneOS16.5.sdk.tar.xz -C "$THEOS/sdks"
 
       - name: Build package
         run: |
-          export THEOS=${{ github.workspace }}/theos
+          export THEOS="$HOME/theos"
           make package FINALPACKAGE=1
 
       - name: Upload deb artifact
