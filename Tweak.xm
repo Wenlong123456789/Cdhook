@@ -14,13 +14,15 @@
 
 // ============ 全局状态 ============
 static BOOL g_bResetCDToZero = NO;
+static BOOL g_bHooksInstalled = NO;
 static NSInteger g_hookHitCount_Start = 0;
 static NSInteger g_hookHitCount_End   = 0;
 static NSInteger g_hookHitCount_IsIn  = 0;
 static float     g_lastCurCD = -1;
 static float     g_lastMaxCD = -1;
+static NSMutableString *g_lastModuleListText = nil;
 
-// ============ 工具：找当前最顶层的ViewController，用来弹Alert ============
+// ============ 工具：找当前最顶层的ViewController ============
 static UIViewController *TopMostController() {
     UIWindow *keyWindow = nil;
     if (@available(iOS 13.0, *)) {
@@ -32,13 +34,12 @@ static UIViewController *TopMostController() {
             }
         }
     }
-        if (!keyWindow) {
+    if (!keyWindow) {
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         keyWindow = [UIApplication sharedApplication].keyWindow;
         #pragma clang diagnostic pop
     }
-
     UIViewController *top = keyWindow.rootViewController;
     while (top.presentedViewController) {
         top = top.presentedViewController;
@@ -46,8 +47,8 @@ static UIViewController *TopMostController() {
     return top;
 }
 
-// ============ 弹窗工具函数 ============
-static void ShowAlert(NSString *title, NSString *message) {
+// ============ 弹窗工具函数（带一键复制按钮） ============
+static void ShowAlertWithCopy(NSString *title, NSString *message, NSString *copyText) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *top = TopMostController();
         if (!top) return;
@@ -55,9 +56,24 @@ static void ShowAlert(NSString *title, NSString *message) {
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
                                                                          message:message
                                                                   preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+
+        [alert addAction:[UIAlertAction actionWithTitle:@"复制完整日志" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [UIPasteboard generalPasteboard].string = copyText ?: message;
+
+            UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"已复制"
+                                                                               message:@"完整日志已复制到剪贴板，可以粘贴到备忘录/微信发出来"
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
+            [confirm addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [top presentViewController:confirm animated:YES completion:nil];
+        }]];
+
+        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
         [top presentViewController:alert animated:YES completion:nil];
     });
+}
+
+static void ShowAlert(NSString *title, NSString *message) {
+    ShowAlertWithCopy(title, message, message);
 }
 
 // ============ 悬浮小按钮：点一下弹出当前Hook状态 ============
@@ -98,7 +114,8 @@ static void ShowAlert(NSString *title, NSString *message) {
 
 - (void)onTap {
     NSString *msg = [NSString stringWithFormat:
-        @"StartCoolDown 命中: %ld\nEndCoolDown 命中: %ld\nIsInCoolDown 命中: %ld\n\n最近curCD: %.2f\n最近maxCD: %.2f\n\n清零CD开关: %@",
+        @"Hook已安装: %@\n\nStartCoolDown 命中: %ld\nEndCoolDown 命中: %ld\nIsInCoolDown 命中: %ld\n\n最近curCD: %.2f\n最近maxCD: %.2f\n\n清零CD开关: %@",
+        g_bHooksInstalled ? @"是" : @"否(模块未找到)",
         (long)g_hookHitCount_Start, (long)g_hookHitCount_End, (long)g_hookHitCount_IsIn,
         g_lastCurCD, g_lastMaxCD,
         g_bResetCDToZero ? @"开启" : @"关闭"];
@@ -113,6 +130,9 @@ static void ShowAlert(NSString *title, NSString *message) {
                                                style:UIAlertActionStyleDefault
                                              handler:^(UIAlertAction *action) {
         g_bResetCDToZero = !g_bResetCDToZero;
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"复制模块列表" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [UIPasteboard generalPasteboard].string = g_lastModuleListText ?: @"(暂无数据)";
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
     [top presentViewController:alert animated:YES completion:nil];
@@ -134,9 +154,10 @@ static uintptr_t getModuleBaseAccurate(const char *moduleName) {
     return 0;
 }
 
-// 列出所有已加载模块名（找不到UnityFramework时用来排查）
+// 列出所有已加载模块名（完整版，不截断，供复制）
 static NSString *ListAllModules() {
     NSMutableString *result = [NSMutableString string];
+    [result appendFormat:@"共 %u 个已加载模块:\n\n", _dyld_image_count()];
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
         const char *name = _dyld_get_image_name(i);
         NSString *ns = [NSString stringWithUTF8String:name];
@@ -183,31 +204,51 @@ static bool new_IsInCoolDown(void *thiz) {
     return ret;
 }
 
+// ============ 真正安装Hook的函数 ============
+static void TryInstallHooks(void) {
+    if (g_bHooksInstalled) return;
+
+    uintptr_t base = getModuleBaseAccurate(MODULE_NAME);
+    if (base == 0) return;
+
+    void *addr_v3 = (void *)(base + RVA_StartCoolDown_v3);
+    MSHookFunction(addr_v3, (void *)new_StartCoolDown_v3, (void **)&orig_StartCoolDown_v3);
+
+    void *addr_end = (void *)(base + RVA_EndCoolDown);
+    MSHookFunction(addr_end, (void *)new_EndCoolDown, (void **)&orig_EndCoolDown);
+
+    void *addr_isin = (void *)(base + RVA_IsInCoolDown);
+    MSHookFunction(addr_isin, (void *)new_IsInCoolDown, (void **)&orig_IsInCoolDown);
+
+    g_bHooksInstalled = YES;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ShowAlert(@"CDTweak 已加载", [NSString stringWithFormat:@"UnityFramework 基址: 0x%lx\n\n点左上角绿色按钮查看Hook状态", (unsigned long)base]);
+        if (!g_statusButton) {
+            g_statusButton = [[CDStatusButton alloc] init];
+            [g_statusButton makeKeyAndVisible];
+        }
+    });
+}
+
+// ============ dyld镜像加载回调：每次有新模块被加载都会触发 ============
+static void OnImageAdded(const struct mach_header *mh, intptr_t vmaddr_slide) {
+    TryInstallHooks();
+}
+
 // ============ 构造函数 ============
 %ctor {
-    uintptr_t base = getModuleBaseAccurate(MODULE_NAME);
+    TryInstallHooks();
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (base == 0) {
-            // 找不到模块，弹窗列出所有已加载的模块名，方便你确认真实名字
+    _dyld_register_func_for_add_image(OnImageAdded);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!g_bHooksInstalled) {
             NSString *allModules = ListAllModules();
-            ShowAlert(@"CDTweak: 找不到 UnityFramework", allModules);
-            return;
+            g_lastModuleListText = [allModules mutableCopy];
+            ShowAlertWithCopy(@"CDTweak: 10秒内未找到 UnityFramework",
+                               @"点下方按钮复制完整模块列表",
+                               allModules);
         }
-
-        // 成功找到模块，先弹一次确认注入成功
-        ShowAlert(@"CDTweak 已加载", [NSString stringWithFormat:@"UnityFramework 基址: 0x%lx\n\n点左上角绿色按钮查看Hook状态", (unsigned long)base]);
-
-        void *addr_v3 = (void *)(base + RVA_StartCoolDown_v3);
-        MSHookFunction(addr_v3, (void *)new_StartCoolDown_v3, (void **)&orig_StartCoolDown_v3);
-
-        void *addr_end = (void *)(base + RVA_EndCoolDown);
-        MSHookFunction(addr_end, (void *)new_EndCoolDown, (void **)&orig_EndCoolDown);
-
-        void *addr_isin = (void *)(base + RVA_IsInCoolDown);
-        MSHookFunction(addr_isin, (void *)new_IsInCoolDown, (void **)&orig_IsInCoolDown);
-
-        g_statusButton = [[CDStatusButton alloc] init];
-        [g_statusButton makeKeyAndVisible];
     });
 }
