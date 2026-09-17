@@ -1,3 +1,6 @@
+#import <substrate.h>
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
 #import <dlfcn.h>
 #import <dispatch/dispatch.h>
@@ -32,7 +35,7 @@ static NSString *g_lastError = @"";
 
 
 // ============================================================
-// 获取 UnityFramework 基址
+// 获取模块基址
 // ============================================================
 
 static uintptr_t GetModuleBase(const char *moduleName)
@@ -43,18 +46,19 @@ static uintptr_t GetModuleBase(const char *moduleName)
 
         const char *name = _dyld_get_image_name(i);
 
-        if (!name)
+        if (name == NULL)
             continue;
 
-        if (strstr(name, moduleName)) {
+        if (strstr(name, moduleName) == NULL)
+            continue;
 
-            const struct mach_header *header =
-                _dyld_get_image_header(i);
+        const struct mach_header *header =
+            _dyld_get_image_header(i);
 
-            if (header) {
-                return (uintptr_t)header;
-            }
-        }
+        if (header == NULL)
+            continue;
+
+        return (uintptr_t)header;
     }
 
     return 0;
@@ -62,7 +66,7 @@ static uintptr_t GetModuleBase(const char *moduleName)
 
 
 // ============================================================
-// 检查目标地址和特征码
+// 检查目标地址
 // ============================================================
 
 static void CheckTarget(void)
@@ -75,7 +79,8 @@ static void CheckTarget(void)
         g_bTargetReadable = NO;
         g_bPrologMatched = NO;
 
-        g_lastError = @"没有找到 UnityFramework";
+        g_lastError =
+            @"没有找到 UnityFramework";
 
         NSLog(@"[CDTweak] UnityFramework 未找到");
 
@@ -84,51 +89,58 @@ static void CheckTarget(void)
 
     g_bModuleFound = YES;
 
-    g_target = g_base + RVA_TargetFunc;
+    // ========================================================
+    // 计算目标地址
+    // ========================================================
+
+    g_target =
+        g_base + (uintptr_t)RVA_TargetFunc;
 
     if (g_target < g_base) {
 
         g_bTargetReadable = NO;
         g_bPrologMatched = NO;
 
-        g_lastError = @"目标地址计算溢出";
+        g_lastError =
+            @"目标地址计算溢出";
 
-        NSLog(@"[CDTweak] 目标地址计算失败");
+        NSLog(
+            @"[CDTweak] 目标地址计算失败"
+        );
 
         return;
     }
 
-    NSLog(@"[CDTweak] UnityFramework Base = 0x%llx",
-          (unsigned long long)g_base);
+    NSLog(
+        @"[CDTweak] UnityFramework Base = 0x%llx",
+        (unsigned long long)g_base
+    );
 
-    NSLog(@"[CDTweak] Target Address = 0x%llx",
-          (unsigned long long)g_target);
+    NSLog(
+        @"[CDTweak] Target Address = 0x%llx",
+        (unsigned long long)g_target
+    );
 
-    /*
-     * 注意：
-     *
-     * 这里只读取目标地址上的 8 字节。
-     *
-     * 不执行 MSHookFunction
-     * 不执行内存写入
-     * 不修改目标函数
-     */
 
-    uint8_t current[8] = {0};
+    // ========================================================
+    // 使用 dladdr 检查地址是否属于已加载映像
+    // ========================================================
 
-    /*
-     * Objective-C 的 @try 无法捕获 EXC_BAD_ACCESS。
-     * 因此这里仅在地址已经属于正常映像范围的情况下读取。
-     *
-     * 对于当前诊断用途，我们进一步通过 dladdr
-     * 判断目标地址是否落在已加载映像中。
-     */
+    struct Dl_info info;
 
-    Dl_info info;
+    memset(
+        &info,
+        0,
+        sizeof(info)
+    );
 
-    memset(&info, 0, sizeof(info));
+    int result =
+        dladdr(
+            (const void *)g_target,
+            &info
+        );
 
-    if (dladdr((const void *)g_target, &info) == 0) {
+    if (result == 0) {
 
         g_bTargetReadable = NO;
         g_bPrologMatched = NO;
@@ -136,38 +148,64 @@ static void CheckTarget(void)
         g_lastError =
             @"目标地址不属于当前已加载的 Mach-O 映像";
 
-        NSLog(@"[CDTweak] dladdr failed");
+        NSLog(
+            @"[CDTweak] dladdr failed"
+        );
 
         return;
     }
 
+
     g_bTargetReadable = YES;
 
-    memcpy(current,
-           (const void *)g_target,
-           sizeof(current));
 
-    NSLog(@"[CDTweak] Target bytes: "
-          "%02X %02X %02X %02X %02X %02X %02X %02X",
-          current[0],
-          current[1],
-          current[2],
-          current[3],
-          current[4],
-          current[5],
-          current[6],
-          current[7]);
+    // ========================================================
+    // 读取目标地址前 8 字节
+    // ========================================================
 
-    if (memcmp(current,
-               kExpectedProlog,
-               sizeof(kExpectedProlog)) == 0) {
+    uint8_t current[8] = {0};
+
+    memcpy(
+        current,
+        (const void *)g_target,
+        sizeof(current)
+    );
+
+
+    NSLog(
+        @"[CDTweak] Target bytes: "
+        "%02X %02X %02X %02X "
+        "%02X %02X %02X %02X",
+
+        current[0],
+        current[1],
+        current[2],
+        current[3],
+        current[4],
+        current[5],
+        current[6],
+        current[7]
+    );
+
+
+    // ========================================================
+    // 比较特征码
+    // ========================================================
+
+    if (memcmp(
+            current,
+            kExpectedProlog,
+            sizeof(kExpectedProlog)
+        ) == 0) {
 
         g_bPrologMatched = YES;
 
         g_lastError =
             @"目标地址有效，特征码匹配";
 
-        NSLog(@"[CDTweak] Prolog MATCH");
+        NSLog(
+            @"[CDTweak] Prolog MATCH"
+        );
 
     } else {
 
@@ -178,6 +216,7 @@ static void CheckTarget(void)
         snprintf(
             buffer,
             sizeof(buffer),
+
             "特征码不匹配，实际数据: "
             "%02X %02X %02X %02X "
             "%02X %02X %02X %02X",
@@ -195,13 +234,31 @@ static void CheckTarget(void)
         g_lastError =
             [NSString stringWithUTF8String:buffer];
 
-        NSLog(@"[CDTweak] %@", g_lastError);
+        NSLog(
+            @"[CDTweak] %s",
+            buffer
+        );
     }
 
-    if (info.dli_fname) {
 
-        NSLog(@"[CDTweak] Target image = %s",
-              info.dli_fname);
+    // ========================================================
+    // 输出目标地址所属映像
+    // ========================================================
+
+    if (info.dli_fname != NULL) {
+
+        NSLog(
+            @"[CDTweak] Target image = %s",
+            info.dli_fname
+        );
+    }
+
+    if (info.dli_sname != NULL) {
+
+        NSLog(
+            @"[CDTweak] Target symbol = %s",
+            info.dli_sname
+        );
     }
 }
 
@@ -218,16 +275,33 @@ static void CheckTarget(void)
 
 - (instancetype)init
 {
-    self = [super initWithFrame:
-            CGRectMake(20.0, 120.0, 56.0, 56.0)];
+    self =
+        [super initWithFrame:
+            CGRectMake(
+                20.0,
+                120.0,
+                56.0,
+                56.0
+            )];
 
     if (self) {
 
-        self.backgroundColor = UIColor.clearColor;
+        // ====================================================
+        // UIWindow
+        // ====================================================
 
-        self.windowLevel = UIWindowLevelAlert + 1.0;
+        self.backgroundColor =
+            UIColor.clearColor;
+
+        self.windowLevel =
+            UIWindowLevelAlert + 1.0;
 
         self.hidden = NO;
+
+
+        // ====================================================
+        // iOS 13+ Scene
+        // ====================================================
 
         if (@available(iOS 13.0, *)) {
 
@@ -237,39 +311,52 @@ static void CheckTarget(void)
                 if (scene.activationState ==
                     UISceneActivationStateForegroundActive) {
 
-                    self.windowScene = scene;
+                    self.windowScene =
+                        scene;
 
                     break;
                 }
             }
         }
 
-        UIButton *button =
-            [UIButton buttonWithType:UIButtonTypeSystem];
 
-        button.frame = self.bounds;
+        // ====================================================
+        // 创建按钮
+        // ====================================================
+
+        UIButton *button =
+            [UIButton buttonWithType:
+                UIButtonTypeSystem];
+
+        button.frame =
+            self.bounds;
 
         button.backgroundColor =
             [UIColor colorWithWhite:0.10
                               alpha:0.92];
 
-        button.layer.cornerRadius = 28.0;
+        button.layer.cornerRadius =
+            28.0;
 
-        button.layer.masksToBounds = YES;
+        button.layer.masksToBounds =
+            YES;
 
         [button setTitle:@"SPD"
-                forState:UIControlStateNormal];
+                forState:
+                    UIControlStateNormal];
 
         [button setTitleColor:
                     UIColor.whiteColor
-                forState:UIControlStateNormal];
+                forState:
+                    UIControlStateNormal];
 
         button.titleLabel.font =
             [UIFont boldSystemFontOfSize:14.0];
 
         [button addTarget:self
                    action:@selector(onTap)
-         forControlEvents:UIControlEventTouchUpInside];
+         forControlEvents:
+             UIControlEventTouchUpInside];
 
         [self addSubview:button];
     }
@@ -285,58 +372,80 @@ static void CheckTarget(void)
 - (void)onTap
 {
     NSString *moduleStatus =
-        g_bModuleFound ? @"是" : @"否";
+        g_bModuleFound
+            ? @"是"
+            : @"否";
 
     NSString *readStatus =
-        g_bTargetReadable ? @"是" : @"否";
+        g_bTargetReadable
+            ? @"是"
+            : @"否";
 
     NSString *prologStatus =
-        g_bPrologMatched ? @"是" : @"否";
+        g_bPrologMatched
+            ? @"是"
+            : @"否";
 
     NSString *hookStatus =
-        g_bHooksInstalled ? @"是" : @"否";
+        g_bHooksInstalled
+            ? @"是"
+            : @"否";
+
 
     NSString *message =
         [NSString stringWithFormat:
 
-         @"UnityFramework: %@\n"
-          "目标地址可读取: %@\n"
-          "特征码匹配: %@\n"
-          "Hook: %@\n\n"
-          "基址: 0x%llx\n"
-          "目标地址: 0x%llx\n\n"
-          "状态:\n%@",
+            @"UnityFramework: %@\n"
+             "目标地址可读取: %@\n"
+             "特征码匹配: %@\n"
+             "Hook: %@\n\n"
+             "基址: 0x%llx\n"
+             "目标地址: 0x%llx\n\n"
+             "状态:\n%@",
 
-         moduleStatus,
-         readStatus,
-         prologStatus,
-         hookStatus,
+            moduleStatus,
+            readStatus,
+            prologStatus,
+            hookStatus,
 
-         (unsigned long long)g_base,
-         (unsigned long long)g_target,
+            (unsigned long long)g_base,
+            (unsigned long long)g_target,
 
-         g_lastError ?: @"无"
+            g_lastError ?: @"无"
         ];
+
+
+    // ========================================================
+    // 创建 Alert
+    // ========================================================
 
     UIAlertController *alert =
         [UIAlertController
-         alertControllerWithTitle:@"CDTweak 诊断"
-         message:message
-         preferredStyle:UIAlertControllerStyleAlert];
+            alertControllerWithTitle:
+                @"CDTweak 诊断"
+
+            message:
+                message
+
+            preferredStyle:
+                UIAlertControllerStyleAlert];
+
 
     [alert addAction:
         [UIAlertAction
-         actionWithTitle:@"确定"
-         style:UIAlertActionStyleCancel
-         handler:nil]];
-
-
-    UIViewController *root = nil;
+            actionWithTitle:@"确定"
+            style:
+                UIAlertActionStyleCancel
+            handler:nil]];
 
 
     // ========================================================
-    // iOS 13+
+    // 查找当前 UIWindow
     // ========================================================
+
+    UIViewController *root =
+        nil;
+
 
     if (@available(iOS 13.0, *)) {
 
@@ -349,6 +458,7 @@ static void CheckTarget(void)
                 continue;
             }
 
+
             for (UIWindow *window
                  in scene.windows) {
 
@@ -360,6 +470,7 @@ static void CheckTarget(void)
                     break;
                 }
             }
+
 
             if (root)
                 break;
@@ -392,7 +503,7 @@ static void CheckTarget(void)
 
 
     // ========================================================
-    // 找到最上层控制器
+    // 获取最上层控制器
     // ========================================================
 
     while (root.presentedViewController) {
@@ -402,13 +513,24 @@ static void CheckTarget(void)
     }
 
 
-    [root presentViewController:alert
-                       animated:YES
-                     completion:nil];
+    // ========================================================
+    // 显示
+    // ========================================================
+
+    [root presentViewController:
+        alert
+
+        animated:YES
+
+        completion:nil];
 }
 
 @end
 
+
+// ============================================================
+// 全局悬浮按钮
+// ============================================================
 
 static SpeedButton *g_button = nil;
 
@@ -419,18 +541,22 @@ static SpeedButton *g_button = nil;
 
 static void CreateButton(void)
 {
-    dispatch_async(dispatch_get_main_queue(), ^{
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
 
-        if (g_button)
-            return;
+            if (g_button)
+                return;
 
-        if (!UIApplication.sharedApplication)
-            return;
+            if (!UIApplication.sharedApplication)
+                return;
 
-        g_button =
-            [[SpeedButton alloc] init];
 
-    });
+            g_button =
+                [[SpeedButton alloc] init];
+
+        }
+    );
 }
 
 
@@ -448,65 +574,107 @@ static void RunDiagnostic(void)
     scheduled = YES;
 
 
-    dispatch_async(dispatch_get_main_queue(), ^{
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
 
-        /*
-         * 等待 UIApplication / Scene / UnityFramework
-         * 完成基本初始化。
-         */
+            /*
+             * 等待 App / Scene / UnityFramework
+             * 完成基本初始化。
+             */
 
-        dispatch_after(
-            dispatch_time(
-                DISPATCH_TIME_NOW,
-                (int64_t)(1.5 * NSEC_PER_SEC)
-            ),
-            dispatch_get_main_queue(),
-            ^{
+            dispatch_after(
+                dispatch_time(
+                    DISPATCH_TIME_NOW,
+                    (int64_t)(
+                        1.5 *
+                        NSEC_PER_SEC
+                    )
+                ),
 
-                CheckTarget();
+                dispatch_get_main_queue(),
 
-                CreateButton();
+                ^{
+
+                    // ========================================
+                    // 检查模块和目标地址
+                    // ========================================
+
+                    CheckTarget();
 
 
-                NSLog(
-                    @"[CDTweak] =========================="
-                );
+                    // ========================================
+                    // 创建悬浮按钮
+                    // ========================================
 
-                NSLog(
-                    @"[CDTweak] Module: %@",
-                    g_bModuleFound ? @"FOUND" : @"NOT FOUND"
-                );
+                    CreateButton();
 
-                NSLog(
-                    @"[CDTweak] Base: 0x%llx",
-                    (unsigned long long)g_base
-                );
 
-                NSLog(
-                    @"[CDTweak] Target: 0x%llx",
-                    (unsigned long long)g_target
-                );
+                    // ========================================
+                    // 输出日志
+                    // ========================================
 
-                NSLog(
-                    @"[CDTweak] Readable: %@",
-                    g_bTargetReadable ? @"YES" : @"NO"
-                );
+                    NSLog(
+                        @"[CDTweak] "
+                        @"=========================="
+                    );
 
-                NSLog(
-                    @"[CDTweak] Prolog: %@",
-                    g_bPrologMatched ? @"MATCH" : @"MISMATCH"
-                );
 
-                NSLog(
-                    @"[CDTweak] Hook: NOT INSTALLED"
-                );
+                    NSLog(
+                        @"[CDTweak] Module: %@",
+                        g_bModuleFound
+                            ? @"FOUND"
+                            : @"NOT FOUND"
+                    );
 
-                NSLog(
-                    @"[CDTweak] =========================="
-                );
-            }
-        );
-    });
+
+                    NSLog(
+                        @"[CDTweak] Base: 0x%llx",
+                        (unsigned long long)g_base
+                    );
+
+
+                    NSLog(
+                        @"[CDTweak] Target: 0x%llx",
+                        (unsigned long long)g_target
+                    );
+
+
+                    NSLog(
+                        @"[CDTweak] Readable: %@",
+                        g_bTargetReadable
+                            ? @"YES"
+                            : @"NO"
+                    );
+
+
+                    NSLog(
+                        @"[CDTweak] Prolog: %@",
+                        g_bPrologMatched
+                            ? @"MATCH"
+                            : @"MISMATCH"
+                    );
+
+
+                    NSLog(
+                        @"[CDTweak] Hook: NOT INSTALLED"
+                    );
+
+
+                    NSLog(
+                        @"[CDTweak] Error: %@",
+                        g_lastError ?: @"NONE"
+                    );
+
+
+                    NSLog(
+                        @"[CDTweak] "
+                        @"=========================="
+                    );
+                }
+            );
+        }
+    );
 }
 
 
@@ -522,7 +690,9 @@ static void ImageAdded(
         return;
 
 
-    const char *name = NULL;
+    const char *name =
+        NULL;
+
 
     uint32_t count =
         _dyld_image_count();
@@ -534,6 +704,7 @@ static void ImageAdded(
 
         const struct mach_header *header =
             _dyld_get_image_header(i);
+
 
         if (header == mh) {
 
@@ -549,17 +720,22 @@ static void ImageAdded(
         return;
 
 
-    if (strstr(name, MODULE_NAME)) {
+    if (strstr(
+            name,
+            MODULE_NAME
+        ) != NULL) {
 
         NSLog(
-            @"[CDTweak] UnityFramework loaded: %s",
+            @"[CDTweak] "
+            @"UnityFramework loaded: %s",
             name
         );
 
+
         /*
-         * 不在 dyld 回调内部安装 Hook。
+         * 不在 dyld callback 内安装 Hook。
          *
-         * 只安排后续诊断。
+         * 这里只进行延迟诊断。
          */
 
         RunDiagnostic();
@@ -571,7 +747,7 @@ static void ImageAdded(
 
 
 // ============================================================
-// Tweak Constructor
+// Constructor
 // ============================================================
 
 %ctor
@@ -581,22 +757,18 @@ static void ImageAdded(
     );
 
 
-    /*
-     * 注册 UnityFramework 加载回调。
-     */
+    // ========================================================
+    // 注册 Image 加载回调
+    // ========================================================
 
     _dyld_register_func_for_add_image(
         ImageAdded
     );
 
 
-    /*
-     * 同时进行一次延迟检查。
-     *
-     * 处理一种情况：
-     * UnityFramework 在注册 callback 之前
-     * 已经加载完成。
-     */
+    // ========================================================
+    // 延迟执行一次诊断
+    // ========================================================
 
     RunDiagnostic();
 }
