@@ -1,7 +1,5 @@
-#import <substrate.h>
-#import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
+#import <dlfcn.h>
 #import <dispatch/dispatch.h>
 #import <string.h>
 #import <stdint.h>
