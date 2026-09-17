@@ -5,17 +5,18 @@
 #import <string.h>
 
 #define MODULE_NAME "UnityFramework"
-#define RVA_UpdateCD  0x21EC7A4
+#define RVA_TargetFunc 0x1AC9570   // ⚠️ 用你实测的 FUNC START 偏移替换这里
 
-static BOOL g_bNoCD = YES;
+static BOOL g_bSpeedHack = YES;
 static BOOL g_bHooksInstalled = NO;
 static NSInteger g_hitCount = 0;
 static uintptr_t g_base = 0;
 
-// ============ 简单状态按钮 ============
-@interface CDButton : UIWindow
+// ============ 状态按钮 ============
+@interface SpeedButton : UIWindow
 @end
-@implementation CDButton
+
+@implementation SpeedButton
 - (instancetype)init {
     self = [super initWithFrame:CGRectMake(20, 120, 50, 50)];
     if (self) {
@@ -33,9 +34,9 @@ static uintptr_t g_base = 0;
 
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
         btn.frame = self.bounds;
-        btn.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.95 alpha:0.9];
+        btn.backgroundColor = [UIColor colorWithRed:0.85 green:0.25 blue:0.25 alpha:0.9];
         btn.layer.cornerRadius = 25;
-        [btn setTitle:@"CD" forState:UIControlStateNormal];
+        [btn setTitle:@"SPD" forState:UIControlStateNormal];
         [btn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
         btn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
         [btn addTarget:self action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
@@ -43,22 +44,23 @@ static uintptr_t g_base = 0;
     }
     return self;
 }
+
 - (void)onTap {
     NSString *msg = [NSString stringWithFormat:
-        @"Hook: %@\n命中: %ld\n无CD: %@\n基址: 0x%lx",
+        @"Hook: %@\n命中: %ld\n加速: %@\n基址: 0x%lx",
         g_bHooksInstalled ? @"是" : @"否",
         (long)g_hitCount,
-        g_bNoCD ? @"开" : @"关",
+        g_bSpeedHack ? @"开" : @"关",
         (unsigned long)g_base];
 
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"CDTweak"
-                                                                   message:msg
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:g_bNoCD ? @"关闭无CD" : @"开启无CD"
-                                               style:UIAlertActionStyleDefault
-                                             handler:^(UIAlertAction *a) {
-        g_bNoCD = !g_bNoCD;
-    }]];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SpeedTweak"
+        message:msg
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:g_bSpeedHack ? @"关闭加速" : @"开启加速"
+        style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *a) {
+            g_bSpeedHack = !g_bSpeedHack;
+        }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
 
     UIWindow *key = nil;
@@ -69,22 +71,25 @@ static uintptr_t g_base = 0;
 }
 @end
 
-static CDButton *g_btn = nil;
+static SpeedButton *g_btn = nil;
 
-// ============ Hook（带 MethodInfo*） ============
-static void (*orig_UpdateCD)(void *thiz, void *method);
+// ============ Hook ============
+static void (*orig_TargetFunc)(void *thiz, void *method);
 
-static void new_UpdateCD(void *thiz, void *method) {
+static void new_TargetFunc(void *thiz, void *method) {
     g_hitCount++;
 
-    if (g_bNoCD && thiz) {
-        int32_t *p = (int32_t *)((uintptr_t)thiz + 0x60);
-        if (*p > 0) {
-            *p = 0;
+    if (g_bSpeedHack && thiz) {
+        // 对应汇编: ldr x8, [x19, #0x38]  → 先取出指针
+        uintptr_t ptr = *(uintptr_t *)((uintptr_t)thiz + 0x38);
+        if (ptr) {
+            // 对应汇编: ldr s2, [x8, #0x34] → 把这块内存改成 0.1
+            float *val = (float *)(ptr + 0x34);
+            *val = 0.1f;
         }
     }
 
-    orig_UpdateCD(thiz, method);
+    orig_TargetFunc(thiz, method);
 }
 
 static uintptr_t getModuleBase(const char *name) {
@@ -98,17 +103,15 @@ static uintptr_t getModuleBase(const char *name) {
 
 static void TryInstall() {
     if (g_bHooksInstalled) return;
-
     g_base = getModuleBase(MODULE_NAME);
     if (g_base == 0) return;
 
-    void *addr = (void *)(g_base + RVA_UpdateCD);
-    MSHookFunction(addr, (void *)new_UpdateCD, (void **)&orig_UpdateCD);
-
+    void *addr = (void *)(g_base + RVA_TargetFunc);
+    MSHookFunction(addr, (void *)new_TargetFunc, (void **)&orig_TargetFunc);
     g_bHooksInstalled = YES;
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!g_btn) g_btn = [CDButton new];
+        if (!g_btn) g_btn = [SpeedButton new];
     });
 }
 
