@@ -21,7 +21,7 @@ static NSInteger g_hitCount = 0;
 static uintptr_t g_base = 0;
 static NSString *g_lastError = @"";
 
-// ============ 沙盒内日志,不再碰 /var/mobile ============
+// ============ 沙盒内日志 ============
 static void LogStep(NSString *step) {
     @try {
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
@@ -98,6 +98,7 @@ static void LogStep(NSString *step) {
             style:UIAlertActionStyleDefault
             handler:^(UIAlertAction *a) {
                 g_bSpeedHack = !g_bSpeedHack;
+                LogStep([NSString stringWithFormat:@"手动切换加速开关 -> %@", g_bSpeedHack ? @"开" : @"关"]);
             }]];
     }
     [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
@@ -112,11 +113,17 @@ static void LogStep(NSString *step) {
 
 static SpeedButton *g_btn = nil;
 
-// ============ Hook 逻辑 ============
+// ============ Hook 逻辑(带诊断日志) ============
 static void (*orig_TargetFunc)(void *thiz, void *method);
 
 static void new_TargetFunc(void *thiz, void *method) {
     g_hitCount++;
+
+    // 每 500 次记一笔,崩溃后可以看命中次数是不是在异常暴涨(死循环特征)
+    // 还是在某个点后就彻底停了(卡在别处的特征)
+    if (g_hitCount % 500 == 0) {
+        LogStep([NSString stringWithFormat:@"命中次数=%ld", (long)g_hitCount]);
+    }
 
     if (g_bSpeedHack && thiz) {
         uintptr_t ptr = *(uintptr_t *)((uintptr_t)thiz + 0x38);
