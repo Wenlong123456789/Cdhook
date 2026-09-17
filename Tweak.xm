@@ -1,549 +1,235 @@
+#import <substrate.h>
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
-#import <mach-o/loader.h>
-#import <dispatch/dispatch.h>
-#import <substrate.h>
 #import <string.h>
-#import <stdint.h>
-
-#pragma mark - 配置
 
 #define MODULE_NAME "UnityFramework"
+#define RVA_TargetFunc 0x1AC9570
 
-// 你的目标 RVA
-static const uintptr_t RVA_TargetFunc = 0x1AC9570;
-
-// 目标函数预期特征
+// 目标函数开头 8 字节特征码,防止偏移错位时把别的指令覆盖坏
 static const uint8_t kExpectedProlog[8] = {
-    0xff, 0x43, 0x03, 0xd1,
-    0xeb, 0x2b, 0x09, 0x6d
+    0xff, 0x43, 0x03, 0xd1,   // sub sp, sp, #0xd0
+    0xeb, 0x2b, 0x09, 0x6d    // stp d11, d10, [sp, #0x90]
 };
 
-#pragma mark - 全局状态
-
-static BOOL g_bModuleFound = NO;
-static BOOL g_bPrologMatched = NO;
-static BOOL g_bTargetReadable = NO;
+static BOOL g_bSpeedHack = NO;       // 默认关闭,靠悬浮按钮手动开
 static BOOL g_bHooksInstalled = NO;
-
+static BOOL g_bPrologMatched = NO;
+static BOOL g_bModuleFound = NO;
+static NSInteger g_hitCount = 0;
 static uintptr_t g_base = 0;
-static uintptr_t g_target = 0;
+static NSString *g_lastError = @"";
 
-static NSString *g_lastError = @"暂无";
+// ============ 沙盒内日志,不再碰 /var/mobile ============
+static void LogStep(NSString *step) {
+    @try {
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *dir = paths.firstObject;
+        if (!dir) return;
+        NSString *path = [dir stringByAppendingPathComponent:@"speedtweak.log"];
 
-#pragma mark - SPD Window
-
-@interface SPDViewController : UIViewController
-@end
-
-@implementation SPDViewController
-
-- (void)viewDidLoad
-{
-    [super viewDidLoad];
-
-    self.view.backgroundColor = UIColor.clearColor;
-
-    UIButton *button =
-        [UIButton buttonWithType:UIButtonTypeSystem];
-
-    button.frame =
-        CGRectMake(10, 10, 60, 60);
-
-    button.backgroundColor =
-        [UIColor colorWithRed:0.85
-                        green:0.20
-                         blue:0.20
-                        alpha:0.95];
-
-    button.layer.cornerRadius = 30.0;
-    button.clipsToBounds = YES;
-
-    [button setTitle:@"SPD"
-            forState:UIControlStateNormal];
-
-    [button setTitleColor:UIColor.whiteColor
-                  forState:UIControlStateNormal];
-
-    button.titleLabel.font =
-        [UIFont boldSystemFontOfSize:14.0];
-
-    [button addTarget:self
-               action:@selector(spdButtonClicked:)
-     forControlEvents:UIControlEventTouchUpInside];
-
-    [self.view addSubview:button];
-}
-
-- (void)spdButtonClicked:(UIButton *)sender
-{
-    NSString *message =
-        [NSString stringWithFormat:
-            @"模块找到：%@\n"
-             "目标地址可读取：%@\n"
-             "特征码匹配：%@\n"
-             "Hook：%@\n\n"
-             "UnityFramework 基址：0x%llx\n"
-             "目标地址：0x%llx\n\n"
-             "错误：%@",
-
-            g_bModuleFound ? @"是" : @"否",
-
-            g_bTargetReadable ? @"是" : @"否",
-
-            g_bPrologMatched ? @"是" : @"否",
-
-            g_bHooksInstalled ? @"已安装" : @"未安装",
-
-            (unsigned long long)g_base,
-
-            (unsigned long long)g_target,
-
-            g_lastError
-        ];
-
-    UIAlertController *alert =
-        [UIAlertController
-            alertControllerWithTitle:@"CDTweak 状态"
-            message:message
-            preferredStyle:UIAlertControllerStyleAlert];
-
-    [alert addAction:
-        [UIAlertAction
-            actionWithTitle:@"确定"
-                      style:UIAlertActionStyleDefault
-                    handler:nil]];
-
-    [self presentViewController:alert
-                       animated:YES
-                     completion:nil];
-}
-
-@end
-
-
-@interface SPDWindow : UIWindow
-@end
-
-@implementation SPDWindow
-@end
-
-
-static SPDWindow *g_spdWindow = nil;
-
-#pragma mark - 获取当前 WindowScene
-
-static UIWindowScene *GetActiveWindowScene(void)
-{
-    if (@available(iOS 13.0, *)) {
-
-        // 优先获取正在前台活动的 Scene
-        for (UIScene *scene
-             in UIApplication.sharedApplication.connectedScenes) {
-
-            if (![scene isKindOfClass:[UIWindowScene class]]) {
-                continue;
-            }
-
-            UIWindowScene *windowScene =
-                (UIWindowScene *)scene;
-
-            if (windowScene.activationState ==
-                UISceneActivationStateForegroundActive) {
-
-                return windowScene;
-            }
+        NSString *line = [NSString stringWithFormat:@"%@ | %@\n", [NSDate date], step];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!fh) {
+            [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+            fh = [NSFileHandle fileHandleForWritingAtPath:path];
         }
-
-        // 如果没有 Active，则尝试 Inactive
-        for (UIScene *scene
-             in UIApplication.sharedApplication.connectedScenes) {
-
-            if (![scene isKindOfClass:[UIWindowScene class]]) {
-                continue;
-            }
-
-            UIWindowScene *windowScene =
-                (UIWindowScene *)scene;
-
-            if (windowScene.activationState ==
-                UISceneActivationStateForegroundInactive) {
-
-                return windowScene;
-            }
+        if (fh) {
+            [fh seekToEndOfFile];
+            [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
         }
+    } @catch (...) {
+        // 日志本身绝不能拖垮 App
     }
-
-    return nil;
 }
 
-#pragma mark - 创建 SPD Window
+// ============ 悬浮状态按钮 ============
+@interface SpeedButton : UIWindow
+@end
 
-static void CreateSPDWindow(void)
-{
-    dispatch_async(dispatch_get_main_queue(), ^{
-
-        // 已经创建过就不重复创建
-        if (g_spdWindow != nil) {
-
-            g_spdWindow.hidden = NO;
-
-            return;
-        }
-
-        UIWindowScene *scene =
-            GetActiveWindowScene();
-
+@implementation SpeedButton
+- (instancetype)init {
+    self = [super initWithFrame:CGRectMake(20, 120, 50, 50)];
+    if (self) {
         if (@available(iOS 13.0, *)) {
-
-            if (scene == nil) {
-
-                NSLog(@"[CDTweak] 找不到当前 UIWindowScene");
-
-                g_lastError =
-                    @"找不到当前 UIWindowScene";
-
-                return;
-            }
-
-            g_spdWindow =
-                [[SPDWindow alloc]
-                    initWithWindowScene:scene];
-
-        } else {
-
-            g_spdWindow =
-                [[SPDWindow alloc]
-                    initWithFrame:
-                        CGRectMake(
-                            20,
-                            120,
-                            80,
-                            80)];
-        }
-
-        // 悬浮按钮窗口位置
-        g_spdWindow.frame =
-            CGRectMake(
-                20,
-                120,
-                80,
-                80);
-
-        g_spdWindow.backgroundColor =
-            UIColor.clearColor;
-
-        // 设置窗口层级
-        g_spdWindow.windowLevel =
-            UIWindowLevelAlert + 1.0;
-
-        // 创建控制器
-        SPDViewController *vc =
-            [[SPDViewController alloc] init];
-
-        g_spdWindow.rootViewController = vc;
-
-        // 显示
-        g_spdWindow.hidden = NO;
-
-        [g_spdWindow makeKeyAndVisible];
-
-        NSLog(@"[CDTweak] SPD Window 创建成功");
-
-        // 避免长期抢宿主 App 的 KeyWindow
-        dispatch_after(
-            dispatch_time(
-                DISPATCH_TIME_NOW,
-                (int64_t)(0.1 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(),
-            ^{
-
-                if (g_spdWindow != nil) {
-                    [g_spdWindow resignKeyWindow];
+            for (UIWindowScene *s in UIApplication.sharedApplication.connectedScenes) {
+                if (s.activationState == UISceneActivationStateForegroundActive) {
+                    self.windowScene = s;
+                    break;
                 }
-            });
-    });
+            }
+        }
+        self.windowLevel = UIWindowLevelAlert + 2;
+        self.backgroundColor = UIColor.clearColor;
+        self.hidden = NO;
+
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+        btn.frame = self.bounds;
+        btn.backgroundColor = [UIColor colorWithRed:0.85 green:0.25 blue:0.25 alpha:0.9];
+        btn.layer.cornerRadius = 25;
+        [btn setTitle:@"SPD" forState:UIControlStateNormal];
+        [btn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        btn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+        [btn addTarget:self action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:btn];
+    }
+    return self;
 }
 
-#pragma mark - 获取 UnityFramework 基址
+- (void)onTap {
+    NSString *msg = [NSString stringWithFormat:
+        @"模块找到: %@\n特征码匹配: %@\nHook已装: %@\n命中次数: %ld\n加速: %@\n基址: 0x%lx\n错误: %@",
+        g_bModuleFound ? @"是" : @"否",
+        g_bPrologMatched ? @"是" : @"否",
+        g_bHooksInstalled ? @"是" : @"否",
+        (long)g_hitCount,
+        g_bSpeedHack ? @"开" : @"关",
+        (unsigned long)g_base,
+        g_lastError];
 
-static uintptr_t GetModuleBase(const char *moduleName)
-{
-    uint32_t count = _dyld_image_count();
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SpeedTweak"
+        message:msg
+        preferredStyle:UIAlertControllerStyleAlert];
 
-    for (uint32_t i = 0; i < count; i++) {
+    if (g_bHooksInstalled) {
+        [alert addAction:[UIAlertAction actionWithTitle:g_bSpeedHack ? @"关闭加速" : @"开启加速"
+            style:UIAlertActionStyleDefault
+            handler:^(UIAlertAction *a) {
+                g_bSpeedHack = !g_bSpeedHack;
+            }]];
+    }
+    [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
 
-        const char *imageName =
-            _dyld_get_image_name(i);
+    UIWindow *key = nil;
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        if (w.isKeyWindow) { key = w; break; }
+    }
+    [key.rootViewController presentViewController:alert animated:YES completion:nil];
+}
+@end
 
-        if (imageName == NULL) {
-            continue;
-        }
+static SpeedButton *g_btn = nil;
 
-        if (strstr(imageName, moduleName) != NULL) {
+// ============ Hook 逻辑 ============
+static void (*orig_TargetFunc)(void *thiz, void *method);
 
-            const struct mach_header *header =
-                _dyld_get_image_header(i);
+static void new_TargetFunc(void *thiz, void *method) {
+    g_hitCount++;
 
-            if (header != NULL) {
-
-                return (uintptr_t)header;
-            }
+    if (g_bSpeedHack && thiz) {
+        uintptr_t ptr = *(uintptr_t *)((uintptr_t)thiz + 0x38);
+        if (ptr > 0x100000000) {   // 简单的野指针防护
+            float *val = (float *)(ptr + 0x34);
+            *val = 0.1f;
         }
     }
 
+    orig_TargetFunc(thiz, method);
+}
+
+static uintptr_t getModuleBase(const char *name) {
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        if (strstr(_dyld_get_image_name(i), name)) {
+            return (uintptr_t)_dyld_get_image_header(i);
+        }
+    }
     return 0;
 }
 
-#pragma mark - 查找模块
-
-static void CheckUnityFramework(void)
-{
-    g_base = GetModuleBase(MODULE_NAME);
-
-    if (g_base == 0) {
-
-        g_bModuleFound = NO;
-        g_bPrologMatched = NO;
-        g_bTargetReadable = NO;
-        g_target = 0;
-
-        g_lastError =
-            @"没有找到 UnityFramework";
-
-        NSLog(@"[CDTweak] UnityFramework 未找到");
-
-        return;
-    }
-
-    g_bModuleFound = YES;
-
-    NSLog(
-        @"[CDTweak] UnityFramework 基址: 0x%llx",
-        (unsigned long long)g_base
-    );
-
-    g_target =
-        g_base + RVA_TargetFunc;
-
-    NSLog(
-        @"[CDTweak] 目标地址: 0x%llx",
-        (unsigned long long)g_target
-    );
-
-    /*
-     * 这里只进行基础 Mach-O 地址范围检查。
-     * 不执行 Hook，也不修改目标地址。
-     */
-
-    BOOL addressInImage = NO;
-
-    uint32_t count =
-        _dyld_image_count();
-
-    for (uint32_t i = 0; i < count; i++) {
-
-        const struct mach_header *header =
-            _dyld_get_image_header(i);
-
-        if (header == NULL) {
-            continue;
-        }
-
-        uintptr_t imageBase =
-            (uintptr_t)header;
-
-        if (imageBase != g_base) {
-            continue;
-        }
-
-        intptr_t slide =
-            _dyld_get_image_vmaddr_slide(i);
-
-        /*
-         * 这里只确认目标地址位于
-         * UnityFramework 映像之后。
-         */
-        uintptr_t runtimeBase =
-            imageBase + slide;
-
-        if (g_target >= runtimeBase) {
-            addressInImage = YES;
-        }
-
-        break;
-    }
-
-    if (!addressInImage) {
-
-        g_bTargetReadable = NO;
-        g_bPrologMatched = NO;
-
-        g_lastError =
-            @"目标 RVA 不在当前映像范围";
-
-        NSLog(
-            @"[CDTweak] 目标地址范围检查失败"
-        );
-
-        return;
-    }
-
-    /*
-     * 注意：
-     * 这里只在地址通过基础检查后读取 8 字节。
-     */
-
-    uint8_t bytes[8] = {0};
-
-    memcpy(
-        bytes,
-        (const void *)g_target,
-        sizeof(bytes)
-    );
-
-    g_bTargetReadable = YES;
-
-    NSLog(
-        @"[CDTweak] 目标前8字节: "
-        "%02x %02x %02x %02x "
-        "%02x %02x %02x %02x",
-
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7]
-    );
-
-    if (memcmp(
-            bytes,
-            kExpectedProlog,
-            sizeof(kExpectedProlog)
-        ) == 0) {
-
-        g_bPrologMatched = YES;
-
-        g_lastError =
-            @"特征码匹配";
-
-        NSLog(
-            @"[CDTweak] 特征码匹配"
-        );
-
-    } else {
-
-        g_bPrologMatched = NO;
-
-        g_lastError =
-            @"特征码不匹配，可能是版本/RVA 不对应";
-
-        NSLog(
-            @"[CDTweak] 特征码不匹配"
-        );
-    }
-}
-
-#pragma mark - 显示诊断结果
-
-static void ShowDiagnosticAlert(void)
-{
+static void ShowInjectStatus(NSString *title, NSString *msg) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            UIWindow *key = nil;
+            for (UIWindow *w in UIApplication.sharedApplication.windows) {
+                if (w.isKeyWindow) { key = w; break; }
+            }
+            if (!key.rootViewController) return;
 
-        if (g_spdWindow == nil) {
-            return;
-        }
-
-        UIViewController *vc =
-            g_spdWindow.rootViewController;
-
-        if (vc == nil) {
-            return;
-        }
-
-        NSString *message =
-            [NSString stringWithFormat:
-                @"UnityFramework：%@\n"
-                 "目标地址：0x%llx\n"
-                 "地址检查：%@\n"
-                 "特征码：%@\n"
-                 "Hook：%@\n\n"
-                 "%@",
-
-                g_bModuleFound ? @"已找到" : @"未找到",
-
-                (unsigned long long)g_target,
-
-                g_bTargetReadable ? @"通过" : @"失败",
-
-                g_bPrologMatched ? @"匹配" : @"不匹配",
-
-                g_bHooksInstalled ? @"已安装" : @"未安装",
-
-                g_lastError
-            ];
-
-        UIAlertController *alert =
-            [UIAlertController
-                alertControllerWithTitle:@"CDTweak 诊断"
-                message:message
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                message:msg
                 preferredStyle:UIAlertControllerStyleAlert];
-
-        [alert addAction:
-            [UIAlertAction
-                actionWithTitle:@"确定"
-                          style:UIAlertActionStyleDefault
-                        handler:nil]];
-
-        [vc presentViewController:alert
-                          animated:YES
-                        completion:nil];
+            [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+            [key.rootViewController presentViewController:alert animated:YES completion:nil];
+        } @catch (...) {}
     });
 }
 
-#pragma mark - 初始化
+static void DoInstall() {
+    @try {
+        if (g_bHooksInstalled) return;
 
-%ctor
-{
-    NSLog(@"[CDTweak] Tweak loaded");
+        LogStep(@"DoInstall 开始");
 
-    /*
-     * 等待 App / Unity / Scene 初始化完成。
-     */
-    dispatch_after(
-        dispatch_time(
-            DISPATCH_TIME_NOW,
-            (int64_t)(3.0 * NSEC_PER_SEC)),
-        dispatch_get_main_queue(),
-        ^{
-
-            NSLog(
-                @"[CDTweak] 开始检查 UnityFramework"
-            );
-
-            CheckUnityFramework();
-
-            /*
-             * 创建 SPD 悬浮按钮。
-             */
-            CreateSPDWindow();
-
-            /*
-             * 再延迟一点显示诊断结果。
-             */
-            dispatch_after(
-                dispatch_time(
-                    DISPATCH_TIME_NOW,
-                    (int64_t)(1.0 * NSEC_PER_SEC)),
-                dispatch_get_main_queue(),
-                ^{
-
-                    ShowDiagnosticAlert();
-                });
+        g_base = getModuleBase(MODULE_NAME);
+        if (g_base == 0) {
+            g_lastError = @"未找到 UnityFramework 模块";
+            LogStep(g_lastError);
+            return;
         }
-    );
+        g_bModuleFound = YES;
+        LogStep([NSString stringWithFormat:@"找到模块, 基址=0x%lx", (unsigned long)g_base]);
+
+        void *addr = (void *)(g_base + RVA_TargetFunc);
+        LogStep([NSString stringWithFormat:@"目标地址=0x%lx", (unsigned long)addr]);
+
+        if (memcmp((void *)addr, kExpectedProlog, sizeof(kExpectedProlog)) != 0) {
+            g_bPrologMatched = NO;
+            g_lastError = @"特征码不匹配,偏移可能已失效,已跳过安装";
+            LogStep(g_lastError);
+            ShowInjectStatus(@"SpeedTweak 未安装", g_lastError);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!g_btn) g_btn = [SpeedButton new];
+            });
+            return;
+        }
+        g_bPrologMatched = YES;
+        LogStep(@"特征码匹配");
+
+        MSHookFunction(addr, (void *)new_TargetFunc, (void **)&orig_TargetFunc);
+        g_bHooksInstalled = YES;
+        LogStep(@"MSHookFunction 成功");
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!g_btn) g_btn = [SpeedButton new];
+        });
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ShowInjectStatus(@"SpeedTweak 注入状态",
+                [NSString stringWithFormat:
+                    @"模块: %@\n特征码匹配: %@\nHook已装: %@\n命中次数(2秒内): %ld",
+                    g_bModuleFound ? @"已找到" : @"未找到",
+                    g_bPrologMatched ? @"匹配" : @"不匹配",
+                    g_bHooksInstalled ? @"是" : @"否",
+                    (long)g_hitCount]);
+        });
+    } @catch (NSException *e) {
+        g_lastError = [NSString stringWithFormat:@"DoInstall 异常: %@", e.reason];
+        LogStep(g_lastError);
+    }
+}
+
+%ctor {
+    @try {
+        LogStep(@"===== ctor 启动 =====");
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+            object:nil
+            queue:[NSOperationQueue mainQueue]
+            usingBlock:^(NSNotification *note) {
+                static BOOL done = NO;
+                if (done) return;
+                done = YES;
+                @try {
+                    LogStep(@"App 已激活, 开始安装 hook");
+                    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                        DoInstall();
+                    });
+                } @catch (NSException *e) {
+                    LogStep([NSString stringWithFormat:@"激活回调异常: %@", e.reason]);
+                }
+            }];
+    } @catch (...) {
+        // ctor 阶段任何异常都不能让 App 崩
+    }
 }
