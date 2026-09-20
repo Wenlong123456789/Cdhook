@@ -2,7 +2,7 @@
 #import <objc/runtime.h>
 
 // 前向声明
-static void removeWatermarkInView(UIView *view);
+static void removeTargetViewsInView(UIView *view);
 
 %hook UIView
 
@@ -10,53 +10,92 @@ static void removeWatermarkInView(UIView *view);
     %orig;
     
     NSString *className = NSStringFromClass([self class]);
-    if ([className containsString:@"WatermarkOverlay"] || 
+    
+    // 1. 水印
+    if ([className containsString:@"WatermarkOverlay"] ||
         [className isEqualToString:@"ChinaMerchantsBank.WatermarkOverlay"]) {
         
         self.hidden = YES;
         self.alpha = 0.0;
         self.userInteractionEnabled = NO;
-        // 如果想更彻底可以直接移除：
         // [self removeFromSuperview];
+    }
+    
+    // 2. 悬浮工具栏
+    if ([className containsString:@"_UIFloatingBarContainerView"] ||
+        [className containsString:@"FloatingBarContainerView"]) {
+        
+        self.hidden = YES;
+        self.alpha = 0.0;
+        self.userInteractionEnabled = NO;
+        // [self removeFromSuperview];
+    }
+    
+    // 3. 触摸穿透视图（有时会挡住正常点击）
+    if ([className containsString:@"_UITouchPassthroughView"] ||
+        [className isEqualToString:@"_UITouchPassthroughView"]) {
+        
+        // 这种一般只隐藏，不建议强行 remove，容易影响布局
+        self.hidden = YES;
+        self.alpha = 0.0;
+        // self.userInteractionEnabled = NO;  // 如果需要穿透点击可以注释掉
     }
 }
 
 %end
 
-// 递归清理已存在的水印
-static void removeWatermarkInView(UIView *view) {
+// 递归清理已经存在的目标视图
+static void removeTargetViewsInView(UIView *view) {
     if (!view) return;
     
     NSString *className = NSStringFromClass([view class]);
-    if ([className containsString:@"WatermarkOverlay"]) {
+    
+    BOOL shouldRemove = NO;
+    
+    if ([className containsString:@"WatermarkOverlay"] ||
+        [className isEqualToString:@"ChinaMerchantsBank.WatermarkOverlay"]) {
+        shouldRemove = YES;
+    }
+    
+    if ([className containsString:@"_UIFloatingBarContainerView"] ||
+        [className containsString:@"FloatingBarContainerView"]) {
+        shouldRemove = YES;
+    }
+    
+    if ([className containsString:@"_UITouchPassthroughView"]) {
+        shouldRemove = YES;
+    }
+    
+    if (shouldRemove) {
         view.hidden = YES;
         view.alpha = 0.0;
         view.userInteractionEnabled = NO;
-        [view removeFromSuperview];
+        // 如果想更彻底可以取消下面注释
+        // [view removeFromSuperview];
         return;
     }
     
     // 用 copy 防止边遍历边修改崩溃
     NSArray *subs = [view.subviews copy];
     for (UIView *sub in subs) {
-        removeWatermarkInView(sub);
+        removeTargetViewsInView(sub);
     }
 }
 
 %ctor {
-    // 延迟扫描一次，清理已经存在的水印
+    // 延迟 1.5 秒扫描一次
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         for (UIWindow *window in [UIApplication sharedApplication].windows) {
-            removeWatermarkInView(window);   // ← 这里直接调用，不要加 self
+            removeTargetViewsInView(window);
         }
     });
     
-    // 可选：每 3 秒再扫一次（防止页面切换后水印重新出现）
+    // 可选：每 3 秒再扫一次（防止切换页面后重新出现）
     /*
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [NSTimer scheduledTimerWithTimeInterval:3.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
             for (UIWindow *window in [UIApplication sharedApplication].windows) {
-                removeWatermarkInView(window);
+                removeTargetViewsInView(window);
             }
         }];
     });
