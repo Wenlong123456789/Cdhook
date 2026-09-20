@@ -5,18 +5,10 @@
 static BOOL isTargetClass(NSString *className) {
     if (!className || className.length == 0) return NO;
     
-    // 水印
+    // 1. 水印
     if ([className containsString:@"WatermarkOverlay"]) return YES;
     
-    // 悬浮工具栏
-    if ([className containsString:@"FloatingBarContainerView"] ||
-        [className containsString:@"FloatingBarHostingView"] ||
-        [className containsString:@"_UIFloatingBarContainerView"]) return YES;
-    
-    // 触摸穿透
-    if ([className containsString:@"_UITouchPassthroughView"]) return YES;
-    
-    // BasicFieldView（重点）
+    // 2. BasicFieldView
     if ([className containsString:@"BasicFieldView"]) return YES;
     
     return NO;
