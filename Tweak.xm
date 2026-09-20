@@ -10,12 +10,6 @@ static BOOL isBasicField(NSString *className) {
     return className && [className containsString:@"BasicFieldView"];
 }
 
-static BOOL isTargetView(UIView *view) {
-    if (!view) return NO;
-    NSString *name = NSStringFromClass([view class]);
-    return isWatermark(name) || isBasicField(name);
-}
-
 // ==================== 递归处理 ====================
 static void forceHandleTargets(UIView *view) {
     if (!view) return;
@@ -38,7 +32,7 @@ static void forceHandleTargets(UIView *view) {
         // BasicFieldView：只隐藏，不删除（防止点不动）
         view.hidden = YES;
         view.alpha = 0.0;
-        view.userInteractionEnabled = NO;   // 不响应触摸
+        view.userInteractionEnabled = NO;
         // 注意：这里故意不调用 removeFromSuperview
     }
 }
