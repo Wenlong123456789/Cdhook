@@ -18,27 +18,31 @@ static void removeTargetViewsInView(UIView *view);
         self.hidden = YES;
         self.alpha = 0.0;
         self.userInteractionEnabled = NO;
-        // [self removeFromSuperview];
     }
     
     // 2. 悬浮工具栏
     if ([className containsString:@"_UIFloatingBarContainerView"] ||
-        [className containsString:@"FloatingBarContainerView"]) {
+        [className containsString:@"FloatingBarContainerView"] ||
+        [className containsString:@"FloatingBarHostingView"]) {
         
         self.hidden = YES;
         self.alpha = 0.0;
         self.userInteractionEnabled = NO;
-        // [self removeFromSuperview];
     }
     
-    // 3. 触摸穿透视图（有时会挡住正常点击）
-    if ([className containsString:@"_UITouchPassthroughView"] ||
-        [className isEqualToString:@"_UITouchPassthroughView"]) {
-        
-        // 这种一般只隐藏，不建议强行 remove，容易影响布局
+    // 3. 触摸穿透视图
+    if ([className containsString:@"_UITouchPassthroughView"]) {
         self.hidden = YES;
         self.alpha = 0.0;
-        // self.userInteractionEnabled = NO;  // 如果需要穿透点击可以注释掉
+    }
+    
+    // 4. BasicFieldView
+    if ([className containsString:@"BasicFieldView"] ||
+        [className isEqualToString:@"ChinaMerchantsBank.BasicFieldView"]) {
+        
+        self.hidden = YES;
+        self.alpha = 0.0;
+        self.userInteractionEnabled = NO;
     }
 }
 
@@ -50,23 +54,29 @@ static void removeTargetViewsInView(UIView *view) {
     
     NSString *className = NSStringFromClass([view class]);
     
-    BOOL shouldRemove = NO;
+    BOOL shouldHide = NO;
     
     if ([className containsString:@"WatermarkOverlay"] ||
         [className isEqualToString:@"ChinaMerchantsBank.WatermarkOverlay"]) {
-        shouldRemove = YES;
+        shouldHide = YES;
     }
     
     if ([className containsString:@"_UIFloatingBarContainerView"] ||
-        [className containsString:@"FloatingBarContainerView"]) {
-        shouldRemove = YES;
+        [className containsString:@"FloatingBarContainerView"] ||
+        [className containsString:@"FloatingBarHostingView"]) {
+        shouldHide = YES;
     }
     
     if ([className containsString:@"_UITouchPassthroughView"]) {
-        shouldRemove = YES;
+        shouldHide = YES;
     }
     
-    if (shouldRemove) {
+    if ([className containsString:@"BasicFieldView"] ||
+        [className isEqualToString:@"ChinaMerchantsBank.BasicFieldView"]) {
+        shouldHide = YES;
+    }
+    
+    if (shouldHide) {
         view.hidden = YES;
         view.alpha = 0.0;
         view.userInteractionEnabled = NO;
