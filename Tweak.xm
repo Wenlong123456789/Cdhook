@@ -3,89 +3,98 @@
 
 // 前向声明
 static void removeTargetViewsInView(UIView *view);
+static BOOL isTargetClass(NSString *className);
+
+// 判断是否是目标类
+static BOOL isTargetClass(NSString *className) {
+    if (!className) return NO;
+    
+    // 水印
+    if ([className containsString:@"WatermarkOverlay"] ||
+        [className isEqualToString:@"ChinaMerchantsBank.WatermarkOverlay"]) {
+        return YES;
+    }
+    
+    // 悬浮工具栏
+    if ([className containsString:@"_UIFloatingBarContainerView"] ||
+        [className containsString:@"FloatingBarContainerView"] ||
+        [className containsString:@"FloatingBarHostingView"]) {
+        return YES;
+    }
+    
+    // 触摸穿透视图
+    if ([className containsString:@"_UITouchPassthroughView"]) {
+        return YES;
+    }
+    
+    // BasicFieldView（图一）
+    if ([className containsString:@"BasicFieldView"] ||
+        [className isEqualToString:@"ChinaMerchantsBank.BasicFieldView"]) {
+        return YES;
+    }
+    
+    return NO;
+}
 
 %hook UIView
 
+// 1. 添加到父视图时立刻处理
 - (void)didMoveToSuperview {
     %orig;
     
     NSString *className = NSStringFromClass([self class]);
-    
-    // 1. 水印
-    if ([className containsString:@"WatermarkOverlay"] ||
-        [className isEqualToString:@"ChinaMerchantsBank.WatermarkOverlay"]) {
-        
-        self.hidden = YES;
-        self.alpha = 0.0;
-        self.userInteractionEnabled = NO;
+    if (isTargetClass(className)) {
+        // 直接移除，比 hidden 更彻底
+        [self removeFromSuperview];
     }
-    
-    // 2. 悬浮工具栏
-    if ([className containsString:@"_UIFloatingBarContainerView"] ||
-        [className containsString:@"FloatingBarContainerView"] ||
-        [className containsString:@"FloatingBarHostingView"]) {
-        
-        self.hidden = YES;
-        self.alpha = 0.0;
-        self.userInteractionEnabled = NO;
+}
+
+// 2. 防止被重新显示
+- (void)setHidden:(BOOL)hidden {
+    NSString *className = NSStringFromClass([self class]);
+    if (isTargetClass(className)) {
+        %orig(YES);   // 强制隐藏
+        return;
     }
-    
-    // 3. 触摸穿透视图
-    if ([className containsString:@"_UITouchPassthroughView"]) {
-        self.hidden = YES;
-        self.alpha = 0.0;
+    %orig;
+}
+
+- (void)setAlpha:(CGFloat)alpha {
+    NSString *className = NSStringFromClass([self class]);
+    if (isTargetClass(className)) {
+        %orig(0.0);   // 强制透明
+        return;
     }
+    %orig;
+}
+
+// 3. 布局时再检查一次
+- (void)layoutSubviews {
+    %orig;
     
-    // 4. BasicFieldView
-    if ([className containsString:@"BasicFieldView"] ||
-        [className isEqualToString:@"ChinaMerchantsBank.BasicFieldView"]) {
-        
+    NSString *className = NSStringFromClass([self class]);
+    if (isTargetClass(className)) {
         self.hidden = YES;
         self.alpha = 0.0;
-        self.userInteractionEnabled = NO;
+        [self removeFromSuperview];
     }
 }
 
 %end
 
-// 递归清理已经存在的目标视图
+// 递归清理
 static void removeTargetViewsInView(UIView *view) {
     if (!view) return;
     
     NSString *className = NSStringFromClass([view class]);
     
-    BOOL shouldHide = NO;
-    
-    if ([className containsString:@"WatermarkOverlay"] ||
-        [className isEqualToString:@"ChinaMerchantsBank.WatermarkOverlay"]) {
-        shouldHide = YES;
-    }
-    
-    if ([className containsString:@"_UIFloatingBarContainerView"] ||
-        [className containsString:@"FloatingBarContainerView"] ||
-        [className containsString:@"FloatingBarHostingView"]) {
-        shouldHide = YES;
-    }
-    
-    if ([className containsString:@"_UITouchPassthroughView"]) {
-        shouldHide = YES;
-    }
-    
-    if ([className containsString:@"BasicFieldView"] ||
-        [className isEqualToString:@"ChinaMerchantsBank.BasicFieldView"]) {
-        shouldHide = YES;
-    }
-    
-    if (shouldHide) {
+    if (isTargetClass(className)) {
         view.hidden = YES;
         view.alpha = 0.0;
-        view.userInteractionEnabled = NO;
-        // 如果想更彻底可以取消下面注释
-        // [view removeFromSuperview];
+        [view removeFromSuperview];
         return;
     }
     
-    // 用 copy 防止边遍历边修改崩溃
     NSArray *subs = [view.subviews copy];
     for (UIView *sub in subs) {
         removeTargetViewsInView(sub);
@@ -93,21 +102,19 @@ static void removeTargetViewsInView(UIView *view) {
 }
 
 %ctor {
-    // 延迟 1.5 秒扫描一次
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // 启动后延迟清理一次
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         for (UIWindow *window in [UIApplication sharedApplication].windows) {
             removeTargetViewsInView(window);
         }
     });
     
-    // 可选：每 3 秒再扫一次（防止切换页面后重新出现）
-    /*
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [NSTimer scheduledTimerWithTimeInterval:3.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+    // 持续清理（每 2 秒扫一次，防止页面切换后重新出现）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
             for (UIWindow *window in [UIApplication sharedApplication].windows) {
                 removeTargetViewsInView(window);
             }
         }];
     });
-    */
 }
