@@ -1,79 +1,108 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// 前向声明
-static void removeTargetViewsInView(UIView *view);
-static BOOL isTargetClass(NSString *className);
-
-// 判断是否是目标类
+// ==================== 判断目标类 ====================
 static BOOL isTargetClass(NSString *className) {
-    if (!className) return NO;
+    if (!className || className.length == 0) return NO;
     
     // 水印
-    if ([className containsString:@"WatermarkOverlay"] ||
-        [className isEqualToString:@"ChinaMerchantsBank.WatermarkOverlay"]) {
-        return YES;
-    }
+    if ([className containsString:@"WatermarkOverlay"]) return YES;
     
     // 悬浮工具栏
-    if ([className containsString:@"_UIFloatingBarContainerView"] ||
-        [className containsString:@"FloatingBarContainerView"] ||
-        [className containsString:@"FloatingBarHostingView"]) {
-        return YES;
-    }
+    if ([className containsString:@"FloatingBarContainerView"] ||
+        [className containsString:@"FloatingBarHostingView"] ||
+        [className containsString:@"_UIFloatingBarContainerView"]) return YES;
     
-    // 触摸穿透视图
-    if ([className containsString:@"_UITouchPassthroughView"]) {
-        return YES;
-    }
+    // 触摸穿透
+    if ([className containsString:@"_UITouchPassthroughView"]) return YES;
     
-    // BasicFieldView（图一）
-    if ([className containsString:@"BasicFieldView"] ||
-        [className isEqualToString:@"ChinaMerchantsBank.BasicFieldView"]) {
-        return YES;
-    }
+    // BasicFieldView（重点）
+    if ([className containsString:@"BasicFieldView"]) return YES;
     
     return NO;
 }
 
+static BOOL isTargetView(UIView *view) {
+    if (!view) return NO;
+    return isTargetClass(NSStringFromClass([view class]));
+}
+
+// ==================== 递归强制删除 ====================
+static void forceRemoveTargets(UIView *view) {
+    if (!view) return;
+    
+    // 先处理子视图（从后往前删更安全）
+    NSArray *subs = [view.subviews copy];
+    for (UIView *sub in [subs reverseObjectEnumerator]) {
+        forceRemoveTargets(sub);
+    }
+    
+    if (isTargetView(view)) {
+        view.hidden = YES;
+        view.alpha = 0.0;
+        view.userInteractionEnabled = NO;
+        [view removeFromSuperview];
+    }
+}
+
+// ==================== Hook addSubview 从源头拦截 ====================
 %hook UIView
 
-// 1. 添加到父视图时立刻处理
+- (void)addSubview:(UIView *)view {
+    if (isTargetView(view)) {
+        // 直接不添加
+        return;
+    }
+    %orig;
+}
+
+- (void)insertSubview:(UIView *)view atIndex:(NSInteger)index {
+    if (isTargetView(view)) {
+        return;
+    }
+    %orig;
+}
+
+- (void)insertSubview:(UIView *)view aboveSubview:(UIView *)siblingSubview {
+    if (isTargetView(view)) {
+        return;
+    }
+    %orig;
+}
+
+- (void)insertSubview:(UIView *)view belowSubview:(UIView *)siblingSubview {
+    if (isTargetView(view)) {
+        return;
+    }
+    %orig;
+}
+
 - (void)didMoveToSuperview {
     %orig;
-    
-    NSString *className = NSStringFromClass([self class]);
-    if (isTargetClass(className)) {
-        // 直接移除，比 hidden 更彻底
+    if (isTargetView(self)) {
         [self removeFromSuperview];
     }
 }
 
-// 2. 防止被重新显示
 - (void)setHidden:(BOOL)hidden {
-    NSString *className = NSStringFromClass([self class]);
-    if (isTargetClass(className)) {
-        %orig(YES);   // 强制隐藏
+    if (isTargetView(self)) {
+        %orig(YES);
         return;
     }
     %orig;
 }
 
 - (void)setAlpha:(CGFloat)alpha {
-    NSString *className = NSStringFromClass([self class]);
-    if (isTargetClass(className)) {
-        %orig(0.0);   // 强制透明
+    if (isTargetView(self)) {
+        %orig(0.0);
         return;
     }
     %orig;
 }
 
-// 3. 布局时再检查一次
 - (void)layoutSubviews {
     %orig;
-    
-    NSString *className = NSStringFromClass([self class]);
-    if (isTargetClass(className)) {
+    if (isTargetView(self)) {
         self.hidden = YES;
         self.alpha = 0.0;
         [self removeFromSuperview];
@@ -82,38 +111,20 @@ static BOOL isTargetClass(NSString *className) {
 
 %end
 
-// 递归清理
-static void removeTargetViewsInView(UIView *view) {
-    if (!view) return;
-    
-    NSString *className = NSStringFromClass([view class]);
-    
-    if (isTargetClass(className)) {
-        view.hidden = YES;
-        view.alpha = 0.0;
-        [view removeFromSuperview];
-        return;
-    }
-    
-    NSArray *subs = [view.subviews copy];
-    for (UIView *sub in subs) {
-        removeTargetViewsInView(sub);
-    }
-}
-
+// ==================== 启动后持续清理 ====================
 %ctor {
-    // 启动后延迟清理一次
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // 1.5 秒后清理一次
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         for (UIWindow *window in [UIApplication sharedApplication].windows) {
-            removeTargetViewsInView(window);
+            forceRemoveTargets(window);
         }
     });
     
-    // 持续清理（每 2 秒扫一次，防止页面切换后重新出现）
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+    // 每 1.5 秒持续清理（防止页面切换重新创建）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer * _Nonnull timer) {
             for (UIWindow *window in [UIApplication sharedApplication].windows) {
-                removeTargetViewsInView(window);
+                forceRemoveTargets(window);
             }
         }];
     });
