@@ -1,39 +1,25 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// ==================== 判断目标类 ====================
+// ==================== 判断是否是水印 ====================
 static BOOL isWatermark(NSString *className) {
     return className && [className containsString:@"WatermarkOverlay"];
 }
 
-static BOOL isBasicField(NSString *className) {
-    return className && [className containsString:@"BasicFieldView"];
-}
-
-// ==================== 递归处理 ====================
-static void forceHandleTargets(UIView *view) {
+// ==================== 递归删除水印 ====================
+static void forceRemoveWatermark(UIView *view) {
     if (!view) return;
     
     NSArray *subs = [view.subviews copy];
     for (UIView *sub in [subs reverseObjectEnumerator]) {
-        forceHandleTargets(sub);
+        forceRemoveWatermark(sub);
     }
     
-    NSString *name = NSStringFromClass([view class]);
-    
-    if (isWatermark(name)) {
-        // 水印：直接删掉
+    if (isWatermark(NSStringFromClass([view class]))) {
         view.hidden = YES;
         view.alpha = 0.0;
         view.userInteractionEnabled = NO;
         [view removeFromSuperview];
-    }
-    else if (isBasicField(name)) {
-        // BasicFieldView：只隐藏，不删除（防止点不动）
-        view.hidden = YES;
-        view.alpha = 0.0;
-        view.userInteractionEnabled = NO;
-        // 注意：这里故意不调用 removeFromSuperview
     }
 }
 
@@ -41,48 +27,22 @@ static void forceHandleTargets(UIView *view) {
 %hook UIView
 
 - (void)addSubview:(UIView *)view {
-    if (!view) {
-        %orig;
-        return;
-    }
-    
-    NSString *name = NSStringFromClass([view class]);
-    
-    if (isWatermark(name)) {
+    if (view && isWatermark(NSStringFromClass([view class]))) {
         // 水印直接不添加
         return;
     }
-    
-    if (isBasicField(name)) {
-        // BasicFieldView 允许添加，但马上隐藏
-        %orig;
-        view.hidden = YES;
-        view.alpha = 0.0;
-        view.userInteractionEnabled = NO;
-        return;
-    }
-    
     %orig;
 }
 
 - (void)didMoveToSuperview {
     %orig;
-    
-    NSString *name = NSStringFromClass([self class]);
-    
-    if (isWatermark(name)) {
+    if (isWatermark(NSStringFromClass([self class]))) {
         [self removeFromSuperview];
-    }
-    else if (isBasicField(name)) {
-        self.hidden = YES;
-        self.alpha = 0.0;
-        self.userInteractionEnabled = NO;
     }
 }
 
 - (void)setHidden:(BOOL)hidden {
-    NSString *name = NSStringFromClass([self class]);
-    if (isWatermark(name) || isBasicField(name)) {
+    if (isWatermark(NSStringFromClass([self class]))) {
         %orig(YES);
         return;
     }
@@ -90,8 +50,7 @@ static void forceHandleTargets(UIView *view) {
 }
 
 - (void)setAlpha:(CGFloat)alpha {
-    NSString *name = NSStringFromClass([self class]);
-    if (isWatermark(name) || isBasicField(name)) {
+    if (isWatermark(NSStringFromClass([self class]))) {
         %orig(0.0);
         return;
     }
@@ -100,24 +59,23 @@ static void forceHandleTargets(UIView *view) {
 
 %end
 
-// ==================== 启动清理 ====================
+// ==================== 启动后清理几次 ====================
 %ctor {
-    // 只在启动后清理几次，不再用高频定时器（减少干扰）
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         for (UIWindow *window in [UIApplication sharedApplication].windows) {
-            forceHandleTargets(window);
+            forceRemoveWatermark(window);
         }
     });
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         for (UIWindow *window in [UIApplication sharedApplication].windows) {
-            forceHandleTargets(window);
+            forceRemoveWatermark(window);
         }
     });
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         for (UIWindow *window in [UIApplication sharedApplication].windows) {
-            forceHandleTargets(window);
+            forceRemoveWatermark(window);
         }
     });
 }
